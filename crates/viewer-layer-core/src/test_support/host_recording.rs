@@ -102,7 +102,7 @@ pub fn record_with(settings: Writing, tables: usize, hours: u32, mut hour: impl 
 
 pub struct Sum {
     pub(crate) column: Option<Num<i32>>,
-    pub(crate) second: bool,
+    pub second: bool,
     pub(crate) refuse_high: bool,
     pub hide_high: bool,
     pub(crate) read: Vec<Option<i32>>,
