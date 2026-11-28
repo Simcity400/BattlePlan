@@ -636,7 +636,7 @@ test('a top tile view survives an empty first window, stays quiet through the se
   view.close();
 });
 
-test('followed ranks ask only for newly needed keys and match exactly ranked tiles', async () => {
+test('followed ranks publish only changed history, ask for new keys, and match exactly ranked tiles', async () => {
   const viewport = { from: 80, to: 125, end: 125, width: 100 };
   const before = { tags: ['GER', 'ITA'], hour: 100, from: 100, until: 110, refused: null };
   const after = { tags: ['ITA', 'JAP'], hour: 111, from: 111, until: 115, refused: null };
@@ -646,7 +646,7 @@ test('followed ranks ask only for newly needed keys and match exactly ranked til
   const make = (tags: readonly string[], binHours: number, index: number) =>
     reply(tags, binHours, index, LAST, (at, hour) => value(TAGS.indexOf(tags[at]!), hour));
   const calls: string[][] = [];
-  let rankedRequests = 0, exactRequests = 0;
+  let rankedRequests = 0, exactRequests = 0, publications = 0;
   const exact = new TileView(new TileCache(1024 * 1024), {
     key: 'rank-test', tags: [], lastHour: LAST,
     ask: async (binHours, index, tags) => make(tags, binHours, index),
@@ -664,8 +664,8 @@ test('followed ranks ask only for newly needed keys and match exactly ranked til
       const rank = rankAt(hour);
       return { ...make(rank.tags, binHours, index), ranking: { ...rank, hour } };
     } },
-  }, () => {});
-  const choices = (view: TileView) => [...(view.current ?? [])].map(([tag, line]) => [tag, line.summary.buckets]);
+  }, () => { publications++; });
+  const choices = (view: TileView) => new Map([...(view.current ?? [])].map(([tag, line]) => [tag, line.summary.buckets]));
   exact.setView(viewport);
   followed.setView(viewport);
   for (const hour of [100, 105, 111, 116, 121]) {
@@ -674,14 +674,29 @@ test('followed ranks ask only for newly needed keys and match exactly ranked til
     followed.setFollowedRank(hour, { ...rankAt(hour), hour });
     await settle();
     assert.deepEqual(choices(followed), choices(exact), `same picture at ${hour}`);
+    assert.deepEqual(followed.top?.tags, exact.top?.tags);
     assert.equal(followed.top?.refused, exact.top?.refused);
   }
+  followed.setHour(116, true);
+  followed.setFollowedRank(116, reordered);
+  await settle();
+  const history = followed.current;
+  const published = publications;
+  for (const hour of [117, 118, 119]) {
+    const tags = hour === 118 ? reordered.tags : after.tags;
+    followed.setHour(hour, true);
+    followed.setFollowedRank(hour, { tags, hour, from: hour, until: hour, refused: null });
+    assert.deepEqual(followed.top?.tags, tags, 'the head keeps the new rank order');
+    assert.equal(followed.top?.until, hour, 'the proof still advances');
+    assert.equal(followed.current, history);
+  }
+  assert.equal(publications, published, 'changing only order and proof never publishes new history');
   assert.equal(rankedRequests, 0);
   assert.equal(exactRequests, 4);
   assert.deepEqual(calls, [['GER', 'ITA'], ['JAP']]);
   followed.setFollowedRank(126, after);
   assert.equal(followed.top, null, 'an earlier rank cannot cross a gap or its proof');
-  assert.deepEqual(choices(followed), []);
+  assert.equal(followed.current, null);
   followed.setHour(116);
   await settle();
   assert.equal(rankedRequests, 1, 'paused reads still ask the ranked product');

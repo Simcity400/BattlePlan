@@ -178,7 +178,7 @@ test('stockpile history loads keyed tiles for the followed type roster', async (
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(tiles.settled, true);
     assert.ok(tiles.current);
-    assert.deepEqual([...tiles.current.keys()], keys);
+    assert.deepEqual(new Set(tiles.current.keys()), new Set(keys));
   }
   assert.equal(requests.filter(request => request.top !== undefined).length, 0);
   assert.deepEqual(requests.map(request => request.countries), [['mod#tanks', 'rifles'], ['radio']]);

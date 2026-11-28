@@ -346,7 +346,7 @@ test('played equipment produced history uses the followed ranking and asks only 
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(tiles.settled, true);
     assert.ok(tiles.current);
-    assert.deepEqual([...tiles.current.keys()], tags);
+    assert.deepEqual(new Set(tiles.current.keys()), new Set(tags));
   }
   assert.equal(requests.filter(request => request.top !== undefined).length, 0);
   assert.deepEqual(requests.map(request => request.countries), [[7, 8], [9]]);
