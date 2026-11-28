@@ -10,7 +10,7 @@ use replay_frame::frame::{DecodedFrame, discovering};
 use std::{
     fmt::Debug,
     io,
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -105,6 +105,16 @@ struct Held {
     on_wait: Option<Box<dyn FnOnce() + Send>>,
 }
 
+impl Held {
+    fn continuing(&self) -> io::Result<()> {
+        if self.stop {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "The map's orders layer is retiring"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 struct Shared {
     held: Mutex<Held>,
     done: Condvar,
@@ -116,15 +126,8 @@ impl Shared {
     }
 
     fn wait(&self, until: Instant, published: u64, reader: &views::Reader, hour: Hour) -> io::Result<()> {
-        let continuing = |held: &Held| {
-            if held.stop {
-                Err(io::Error::new(io::ErrorKind::Interrupted, "The map's orders layer is retiring"))
-            } else {
-                Ok(())
-            }
-        };
         let held = self.lock();
-        continuing(&held)?;
+        held.continuing()?;
         if held.published != published || held.stopped.as_ref().is_some() || !reader.has_rows_at(hour) {
             return Ok(());
         }
@@ -138,7 +141,7 @@ impl Shared {
         };
         let (held, _) = self.done.wait_timeout(held, until.saturating_duration_since(Instant::now()))
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        continuing(&held)
+        held.continuing()
     }
 
     fn stop(&self) {
@@ -147,11 +150,14 @@ impl Shared {
     }
 }
 
-pub struct Retirement(Arc<Shared>);
+pub struct Retirement(Arc<Shared>, Option<Weak<views::Reader>>);
 
 impl Retirement {
     pub fn stop(self) {
         self.0.stop();
+        if let Some(reader) = self.1.and_then(|reader| reader.upgrade()) {
+            reader.notify_progress();
+        }
     }
 }
 
@@ -345,7 +351,8 @@ impl Orders {
     }
 
     pub fn retirement(&self) -> Retirement {
-        Retirement(Arc::clone(&self.shared))
+        let rows = self.rows.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Retirement(Arc::clone(&self.shared), rows.as_ref().map(Arc::downgrade))
     }
 
     pub fn in_window(mut self) -> Self {
@@ -424,7 +431,7 @@ impl Orders {
                 return Ok(());
             }
             if !rows.has_rows_at(hour) {
-                return Ok(());
+                return self.shared.lock().continuing();
             }
             if Instant::now() >= until {
                 if settling.strict() {

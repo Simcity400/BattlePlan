@@ -42,26 +42,48 @@ fn campaign(at: u32, store: &mut Store) {
 }
 
 #[test]
-fn retiring_a_map_interrupts_an_orders_join_whose_rows_have_not_arrived() {
+fn retiring_a_map_interrupts_an_orders_join_whose_plan_has_not_arrived() {
     use std::sync::mpsc;
     use viewer_layer_core::layers::Settling;
 
-    let entry = open(recorded::record("retiring orders", 2, campaign), Settings::default()).unwrap();
-    let fed = Apart::new(&entry, 0).unwrap();
-    let mut layer = Orders::new(Arc::new(Links));
-    layer.set_views(fed.store()).unwrap();
+    let (_entry, mut fed, mut layer, plans) = gated("retiring orders", busy);
+    plans.set(false);
+    assert!(fed.drive(1));
     let retire = layer.retirement();
     let (waiting, at_wait) = mpsc::channel();
-    layer.shared.lock().on_wait = Some(Box::new(move || waiting.send(()).unwrap()));
+    let returned = waiting.clone();
+    layer.shared.lock().on_wait = Some(Box::new(move || waiting.send(true).unwrap()));
 
     let outcome = std::thread::scope(|scope| {
-        let join = scope.spawn(move || layer.settle_at(1, Settling::still()));
-        at_wait.recv().unwrap();
+        let join = scope.spawn(|| {
+            let outcome = layer.settle_at(1, Settling::still());
+            let _ = returned.send(false);
+            outcome
+        });
+        let waited = at_wait.recv().unwrap();
         retire.stop();
-        join.join().unwrap()
+        let joined = join.join().unwrap();
+        plans.set(true);
+        assert!(waited, "the plan join entered its wait before retirement");
+        joined
     });
 
     assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Interrupted);
+}
+
+#[test]
+fn retiring_after_an_orders_join_yields_wakes_the_map_and_interrupts_the_retry() {
+    use std::sync::mpsc;
+    use viewer_layer_core::layers::Settling;
+
+    let (_entry, fed, mut layer, _plans) = gated("retiring orders with rows owed", busy);
+    let (progress, woke) = mpsc::channel();
+    fed.store().handle().set_on_publish(Arc::new(move || { let _ = progress.send(()); }));
+    layer.settle_at(1, Settling::Whole).unwrap();
+    assert!(!layer.made_at(1), "the join yields until rows arrive");
+    layer.retirement().stop();
+    assert!(woke.try_recv().is_ok(), "retirement also wakes the map's publication wait");
+    assert_eq!(layer.settle_at(1, Settling::Whole).unwrap_err().kind(), io::ErrorKind::Interrupted);
 }
 
 #[test]
