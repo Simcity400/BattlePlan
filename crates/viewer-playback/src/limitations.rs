@@ -127,12 +127,12 @@ fn columns_of<'m, const N: usize>(head: &Head<'_>, mirrors: Option<&'m Mirrors>,
     }
 }
 
-fn decoded<T: NativeValue>((cell, format): (Option<&[u8]>, u16)) -> Option<T> {
+fn decoded<T: NativeValue>((cell, format): (Option<&[u8]>, u16)) -> io::Result<T> {
     let field = match cell {
         Some(bytes) => Field::Opaque(Opaque::Encoded(bytes, format)),
         None => Field::NotRecorded,
     };
-    T::from_field(field).ok()
+    T::from_field(field)
 }
 
 fn facts(head: &Head<'_>) -> (RowFacts, Vec<String>) {
@@ -141,14 +141,24 @@ fn facts(head: &Head<'_>) -> (RowFacts, Vec<String>) {
     let count = |(rows, [column]): (WarningRows<'_>, [usize; 1])| rows.rows().filter(|&slot| rows.number(column, slot).is_some_and(|value| value != 0)).count();
     let unreadable_naval_bases = columns_of(head, mirrors, TableId::NavalBases, ["countries_unreadable"], "Field Naval base access lists", &mut missing).map_or(0, count);
     let unreadable_templates = columns_of(head, mirrors, TableId::DivisionTemplateIcons, ["model_unreadable"], "Field Division template model inputs", &mut missing).map_or(0, count);
-    let ship_counters = columns_of(head, mirrors, TableId::ShipModels, ["counter"], "Field ShipModels formation", &mut missing).map(|(rows, [column])| rows.rows().all(|slot| decoded::<Option<ShipCounterInputs>>(rows.list(column, slot)).flatten().is_some()));
+    let ship_counters = columns_of(head, mirrors, TableId::ShipModels, ["counter"], "Field ShipModels formation", &mut missing).and_then(|(rows, [column])| {
+        match rows.rows().try_fold(true, |all, slot| {
+            decoded::<Option<ShipCounterInputs>>(rows.list(column, slot)).map(|counter| all && counter.is_some())
+        }) {
+            Ok(all) => Some(all),
+            Err(error) => {
+                missing.push(format!("{NOT_GIVEN}Field ShipModels formation: ShipModels.counter could not be read: {error}"));
+                None
+            }
+        }
+    });
     let weather = columns_of(head, mirrors, TableId::WeatherRegions, ["light_rain", "heavy_rain", "snow", "blizzard", "sandstorm"], "Field weather particle presentation", &mut missing)
         .is_some_and(|(rows, columns)| rows.rows().any(|slot| columns.iter().any(|&column| rows.number(column, slot).is_some_and(|value| value != 0))));
     let mut display_missing = Vec::new();
     let weather_display = columns_of(head, mirrors, TableId::WeatherProvinces, ["display"], "Field WeatherProvinces.display", &mut display_missing).map(|(rows, [column])| {
         match rows.slot(0).map(|slot| decoded::<Recorded<Option<WeatherDisplay>>>(rows.list(column, slot))) {
-            Some(Some(Recorded::Value(Some(_)))) => None,
-            Some(Some(Recorded::NotRecorded)) => Some(DISPLAY_NOT_RECORDED),
+            Some(Ok(Recorded::Value(Some(_)))) => None,
+            Some(Ok(Recorded::NotRecorded)) => Some(DISPLAY_NOT_RECORDED),
             _ => Some(DISPLAY_UNAVAILABLE),
         }
     });

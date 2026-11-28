@@ -1,6 +1,6 @@
 
 use viewer_layer_core::layers::{Carried, Settling, Dirty, Inputs, Layer, List, Num, Published, Text, Upstream, View};
-use viewer_layer_core::playhead_host::{Entry, mirror::{Cell, Mirror, Mirrors}, views::{Need, Recording, self}};
+use viewer_layer_core::playhead_host::{Entry, mirror::{Cell, Mirror, Mirrors}, views::{Recording, self}};
 use playhead::Step;
 use replay_columnar::manifest::Status;
 use viewer_layer_core::playhead_host::timeline::{self, Mark};
@@ -707,10 +707,8 @@ impl Ships {
 
     pub fn set_views(&self, store: &views::Store) {
         store.use_columns(TableId::VariantDefinitions);
-        let needs: Vec<Need> = ROSTER_TABLES.iter().map(|&table| Need::every(table)).collect();
-        let reader = store.reader("ship_rosters", &needs);
+        let reader = store.reader("ship_rosters", &[]);
         let mut asked = self.rosters.shared.lock();
-        reader.declare_only(&asked.tables);
         asked.views = Some(Arc::new(reader));
         asked.woken = true;
         drop(asked);

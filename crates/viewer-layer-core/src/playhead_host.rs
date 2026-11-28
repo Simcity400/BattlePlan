@@ -1325,7 +1325,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         let mut compose = vec![false; self.layers.len()];
         let mut applied = Vec::with_capacity(steps.len());
         let (resets_before, applied_before) = (self.resets_taken, self.applied);
-        let (mut waiting, mut after_reset, mut crossing) = (self.composing, false, false);
+        let (mut waiting, mut after_reset) = (self.composing, false);
         let mut moved = viewer_unit_reads::counter_move::MovedHours::default();
         while let Some(step) = steps.pop_front() {
             waiting |= step.last() > head;
@@ -1337,7 +1337,7 @@ impl<P: PlaybackProducts> MapSide<P> {
             if self.overlay.is_some() {
                 self.moved_before(&step, &mut moved);
             }
-            crossing |= self.take_step(&step, &mut frame, &mut compose);
+            self.take_step(&step, &mut frame, &mut compose);
             applied.push(step);
             (waiting, after_reset) = (waiting || reset, after_reset || reset);
         }
@@ -1372,7 +1372,7 @@ impl<P: PlaybackProducts> MapSide<P> {
                 *again = false;
             }
         }
-        let composed_here = crossing && !after_reset && !self.composing && !self.superseded && compose.contains(&true);
+        let composed_here = !after_reset && !self.composing && !self.superseded && compose.contains(&true);
         if composed_here {
             self.compose_here(&compose, &mut frame);
         }
@@ -2077,7 +2077,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         }
     }
 
-    fn take_step(&mut self, step: &Arc<Step>, frame: &mut Frame, compose: &mut [bool]) -> bool {
+    fn take_step(&mut self, step: &Arc<Step>, frame: &mut Frame, compose: &mut [bool]) {
         let mut reset_tables = BTreeSet::new();
         let mut judged: Vec<(usize, Box<Mirror>)> = Vec::new();
         if piece::on() && !step.reset() {
@@ -2090,7 +2090,6 @@ impl<P: PlaybackProducts> MapSide<P> {
             }
         }
         let mirrors = self.mirrors.as_mut().and_then(Arc::get_mut).expect("the mirrors are home and the step's views made");
-        let mut replaced = false;
         for changes in step.tables() {
             if changes.reset()
                 && self.declared.contains_key(&changes.table())
@@ -2100,7 +2099,6 @@ impl<P: PlaybackProducts> MapSide<P> {
                 rebuilt.set_capture(self.entry.capture.get().copied());
                 if let Some(old) = mirrors.insert(rebuilt) {
                     self.worker.drop_later(old);
-                    replaced = true;
                 }
                 reset_tables.insert(changes.table());
             }
@@ -2108,10 +2106,8 @@ impl<P: PlaybackProducts> MapSide<P> {
                 let moved = old.iter().enumerate().filter(|&(new, &from)| from as usize != new).count();
                 frame.renumbers.push((changes.table(), old.len() as u32, moved as u32));
                 reset_tables.insert(changes.table());
-                replaced = true;
             }
         }
-        let crossing = !step.reset() && replaced;
         frame.reset_tables.extend(reset_tables.iter().copied());
         frame.reset_step |= step.reset();
         let (started, cycles) = (Instant::now(), replay_frame::cpu::thread_cycles());
@@ -2151,7 +2147,6 @@ impl<P: PlaybackProducts> MapSide<P> {
         for (wanted, reads) in compose.iter_mut().zip(&self.reads) {
             *wanted |= reads.as_ref().is_ok_and(|tables| step.reset() || tables.iter().any(|table| reset_tables.contains(table)));
         }
-        crossing
     }
 
     fn compose_here(&mut self, compose: &[bool], frame: &mut Frame) {
@@ -2338,6 +2333,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         self.view_shown != *view
             || self.mode.as_ref() != Some(&view.map_mode)
             || !self.whole
+            || !self.makers_home()
             || !self.on_screen().is_some_and(|on| on.settled && on.drawn == Some(head))
             || self.overlay.as_deref().is_some_and(|overlay| overlay.offered_stale(self.layer_parts(), self.branch))
             || self.answers_waiting()

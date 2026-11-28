@@ -115,7 +115,7 @@ impl Shared {
         self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn wait(&self, until: Instant, published: u64, reader: &views::Reader) -> io::Result<()> {
+    fn wait(&self, until: Instant, published: u64, reader: &views::Reader, hour: Hour) -> io::Result<()> {
         let continuing = |held: &Held| {
             if held.stop {
                 Err(io::Error::new(io::ErrorKind::Interrupted, "The map's orders layer is retiring"))
@@ -125,7 +125,7 @@ impl Shared {
         };
         let held = self.lock();
         continuing(&held)?;
-        if held.published != published || held.stopped.as_ref().is_some() || reader.frame().is_none() {
+        if held.published != published || held.stopped.as_ref().is_some() || !reader.has_rows_at(hour) {
             return Ok(());
         }
         #[cfg(test)]
@@ -231,6 +231,7 @@ fn work(shared: &Shared, plans: &dyn Plans, reader: &views::Reader, maker: timel
                 held.published = stamp;
                 (made.stands, made.frame, made.stamp) = (stands, Some(Arc::clone(&newest)), stamp);
                 held.made.publish((generation, build_seq, made.stands), made);
+                reader.notify_progress();
             }
             drop(held);
             shared.done.notify_all();
@@ -286,6 +287,7 @@ fn work(shared: &Shared, plans: &dyn Plans, reader: &views::Reader, maker: timel
         );
         drop(held);
         shared.done.notify_all();
+        reader.notify_progress();
     }
 }
 
@@ -421,7 +423,7 @@ impl Orders {
                 timeline::mark(self.maker, Mark::Joined);
                 return Ok(());
             }
-            if rows.frame().is_none() {
+            if !rows.has_rows_at(hour) {
                 self.made = None;
                 return Ok(());
             }
@@ -438,7 +440,7 @@ impl Orders {
                 viewer_runtime::view_record::add("arrows", if held { "waits_for_the_build" } else { "waits_for_the_rows" }, 1);
             }
             waited = true;
-            self.shared.wait(until, published, &rows)?;
+            self.shared.wait(until, published, &rows, hour)?;
         }
     }
 

@@ -189,24 +189,18 @@ impl Shared {
         self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn wait(&self, until: Instant, reader: &views::Reader) -> bool {
-        let held = self.lock();
-        if reader.frame().is_none() {
-            return false;
-        }
-        let _ = self.done.wait_timeout(held, until.saturating_duration_since(Instant::now()));
-        true
-    }
-
-    fn answered(&self, stands: Hour) {
+    fn answered(&self, stands: Hour, reader: &views::Reader) {
         let mut held = self.lock();
-        held.answered.advance(stands);
+        let advanced = held.answered.advance(stands);
         held.working = false;
         drop(held);
         self.done.notify_all();
+        if advanced {
+            reader.notify_progress();
+        }
     }
 
-    fn stood(&self, generation: u64, build_seq: u64, stands: Hour, frame: &Arc<DecodedFrame>) {
+    fn stood(&self, generation: u64, build_seq: u64, stands: Hour, frame: &Arc<DecodedFrame>, reader: &views::Reader) {
         let mut held = self.lock();
         if held.generation == generation
             && let Some(mut made) = held.made.as_ref().filter(|made| made.generation == generation && stands > made.stands).cloned()
@@ -215,6 +209,7 @@ impl Shared {
             held.published = stamp;
             (made.stands, made.frame, made.stamp) = (stands, Some(Arc::clone(frame)), stamp);
             held.made.publish((generation, build_seq, made.stands), made);
+            reader.notify_progress();
         }
         drop(held);
         self.done.notify_all();
@@ -259,7 +254,7 @@ fn work(shared: &Shared, select: &dyn Select, reader: &views::Reader, maker: tim
         }
         let stands = through.max(newest.hour);
         if handled.as_ref() == Some(&(published, key.clone())) {
-            shared.answered(stands);
+            shared.answered(stands, reader);
             reader.wait_newer(published, LOOK);
             continue;
         }
@@ -268,9 +263,9 @@ fn work(shared: &Shared, select: &dyn Select, reader: &views::Reader, maker: tim
         let at = (TableKey::of(&*newest, &tables), key);
         if built.as_ref() == Some(&at) {
             if standing.as_ref() == Some(&at) {
-                shared.stood(generation, build_seq, stands, &newest);
+                shared.stood(generation, build_seq, stands, &newest, reader);
             }
-            shared.answered(stands);
+            shared.answered(stands, reader);
             continue;
         }
         let frame = newest;
@@ -413,13 +408,21 @@ impl Models {
         let mut arrived = false;
         loop {
             arrived |= self.take();
-            if self.stands().is_some_and(|stands| stands >= hour) || self.shared.lock().answered.as_ref().is_some_and(|&at| at >= hour) {
+            if self.made_at(hour) {
                 return arrived;
             }
-            if Instant::now() >= until {
+            let held = self.shared.lock();
+            let now = Instant::now();
+            if now >= until || !self.reader.has_rows_at(hour) {
                 return arrived;
             }
-            if !self.shared.wait(until, &self.reader) { return arrived }
+            if held.made.as_ref().is_some_and(|made| {
+                made.generation == self.generation && self.asked.as_ref() == Some(&made.key)
+                    && self.made.as_ref().is_none_or(|ours| ours.stamp < made.stamp)
+            }) {
+                continue;
+            }
+            let _ = self.shared.done.wait_timeout(held, until - now);
         }
     }
 
