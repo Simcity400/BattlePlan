@@ -1,8 +1,9 @@
 import type { FamilyPlanContext } from '../plan.ts';
 import type { FamilyHostAdapter, FamilyRowWindow, FamilySettingsPolicy, ParsedFamilyHit } from '../host/adapter.ts';
+import { sameFieldValue } from '../laneRuntime.ts';
 import type { AnyTableWidgetDeclaration } from './declaration.ts';
 import type { FamilyTableBinding } from './laneView.ts';
-import { buildColumnLayouts, extentsRowWindow, selectVisibleColumns, type RowExtents } from './layout.ts';
+import { buildColumnLayouts, extentsRowWindow, selectVisibleColumns, type RowExtents, type TableRhythm } from './layout.ts';
 import { deriveTableAudit, resolveTableRows, tableRank, type TableColumnSpec, type TableModel } from './model.ts';
 import { combinedPaneRows, resolvePanes } from './panes.ts';
 import { displayWindowToData } from './rowSource.ts';
@@ -22,10 +23,51 @@ interface TableInfoField {
 }
 
 export interface TableChromeState {
-  readonly meta: unknown;
-  readonly widths: unknown;
+  readonly meta: ChromeMeta;
+  readonly widths?: ChromeWidths;
   readonly panes: unknown;
   readonly figures: SubjectFigures;
+}
+
+interface ChromeWidths {
+  readonly widths: Readonly<Record<string, number>>;
+  readonly visible: readonly string[];
+  readonly totals?: readonly string[];
+  readonly scrollable: boolean;
+  readonly pinnedCount?: number;
+}
+
+function chromeWidths(raw: unknown): ChromeWidths | undefined {
+  if (!raw) return undefined;
+  const { widths, visible, totals, scrollable, pinnedCount } = raw as ChromeWidths;
+  return { widths, visible, totals, scrollable, pinnedCount };
+}
+
+interface ChromeMeta {
+  readonly subjectSummary?: TableModel['subjectSummary'];
+  readonly kindFilter?: TableModel['kindFilter'];
+  readonly hideHeader?: boolean;
+  readonly searchable?: boolean;
+  readonly search?: string;
+  readonly rhythm?: TableRhythm;
+  readonly unsorted?: boolean;
+  readonly rankShown?: boolean;
+  readonly rankWidth?: number;
+  readonly hasTree?: boolean;
+  readonly columns?: readonly TableColumnSpec[];
+}
+
+const NO_CHROME_META: ChromeMeta = {};
+const chromeByMeta = new WeakMap<object, ChromeMeta>();
+
+function chromeMeta(raw: unknown): ChromeMeta {
+  if (!raw || typeof raw !== 'object') return NO_CHROME_META;
+  const held = chromeByMeta.get(raw);
+  if (held) return held;
+  const { subjectSummary, kindFilter, hideHeader, searchable, search, rhythm, unsorted, rankShown, rankWidth, hasTree, columns } = raw as ChromeMeta;
+  const chrome = { subjectSummary, kindFilter, hideHeader, searchable, search, rhythm, unsorted, rankShown, rankWidth, hasTree, columns };
+  chromeByMeta.set(raw, chrome);
+  return chrome;
 }
 
 function tableColumns(declaration: AnyTableWidgetDeclaration, ctx: FamilyPlanContext<unknown> | null): readonly TableColumnSpec[] {
@@ -75,8 +117,11 @@ export const tableHostAdapter: FamilyHostAdapter<TableModel, unknown, FamilyTabl
   settings: tableSettingsPolicy,
   chromeState: (fields, previous) => {
     const prev = previous as TableChromeState | undefined;
-    if (prev && prev.widths === fields.widths && prev.panes === fields.panes && (prev.meta === fields.meta || prev.figures.follow(fields.meta))) return prev;
-    return { meta: fields.meta, widths: fields.widths, panes: fields.panes, figures: new SubjectFigures(fields.meta) };
+    const meta = chromeMeta(fields.meta);
+    const widths = chromeWidths(fields.widths);
+    if (prev && sameFieldValue(prev.widths, widths) && sameFieldValue(prev.panes, fields.panes)
+      && (prev.meta.subjectSummary ? prev.figures.follow(meta) : sameFieldValue(prev.meta, meta))) return prev;
+    return { meta, widths, panes: fields.panes, figures: new SubjectFigures(meta) };
   },
   parseHit: parseTableHit,
   getScrollExtent: fields => {

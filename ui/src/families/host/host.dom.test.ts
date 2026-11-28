@@ -180,7 +180,8 @@ test('shared family host handles F1 campaign switch pin clear, F2 leave-then-dea
       mountCommits: number;
       quiet: { hoursAdvanced: number; commits: number; binds: number; paints: number };
       rankedHovers: unknown[];
-      steady: { commits: number; binds: number; paints: number };
+      steady: { commits: number; binds: number; paints: number; diagnosticLines: string[]; title: string };
+      titleAfterPartialChange: { label: string; tooltip: string };
       paused: { commits: number; binds: number; paints: number };
       activatedSubject: string | null;
       activatedMatchesInstalled: boolean;
@@ -192,6 +193,9 @@ test('shared family host handles F1 campaign switch pin clear, F2 leave-then-dea
     assert.deepEqual([generic.quiet.commits, generic.quiet.binds, generic.quiet.paints], [0, 0, 0], 'quiet playback ticks: no React render, no bind, no paint');
     assert.ok(generic.steady.paints > 0, 'steady playback frames repaint in the lane');
     assert.deepEqual([generic.steady.commits, generic.steady.binds], [0, 0], 'steady playback frames: no React render, no bind');
+    assert.ok(generic.steady.diagnosticLines.includes('Recorded warning 19'), 'changed warnings still reach the diagnostics consumer');
+    assert.equal(generic.steady.title, '23 countries', 'the partial title follows without a React commit');
+    assert.deepEqual(generic.titleAfterPartialChange, { label: '4 countries', tooltip: 'Some countries were not recorded' });
     assert.deepEqual([generic.paused.commits, generic.paused.binds, generic.paused.paints], [0, 0, 0], 'paused host settles and sleeps');
     assert.equal(generic.activatedSubject, 'GER', 'Enter activates the focused row from the installed picture');
     assert.equal(generic.activatedMatchesInstalled, true, 'the action carries the installed picture id');

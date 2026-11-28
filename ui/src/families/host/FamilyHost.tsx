@@ -93,7 +93,7 @@ import {
   type MountedFamilyCanvas,
 } from './surface.ts';
 import { useFamilyTheme } from './theme.ts';
-import { FamilyHeaderSummary } from './FamilyHeaderSummary.tsx';
+import { FamilyHeaderSummary, syncHeaderSummary } from './FamilyHeaderSummary.tsx';
 import { mergeAccessibleDescription, mergeDiagnosticNotes, resolveHeaderSummary } from './headerSummary.ts';
 import { rowHoverPublisher, rowPublisher, type TooltipRowSource } from './hoverRow.ts';
 import type { FamilyTooltipField } from './tooltips.ts';
@@ -591,6 +591,8 @@ export default function FamilyHost<TModel = unknown, TOptions = unknown, TBindin
     onTooltipRow,
     onInstalledHour,
     onFollowedTileRanks,
+    onDiagnostics,
+    extraWarnings,
     selectedKey,
     onActivate,
     onPointsNavigate,
@@ -1228,16 +1230,21 @@ export default function FamilyHost<TModel = unknown, TOptions = unknown, TBindin
       const notes = raw?.notes ?? NO_STRINGS;
       const warnings = raw?.warnings ?? NO_STRINGS;
       const shown = metaRef.current;
+      const sameNotes = sameStrings(shown.notes, notes);
+      const sameWarnings = sameStrings(shown.warnings, warnings);
       const sameBody =
         shown.mode === mode && shown.reason === reason && shown.failureOrigin === failureOrigin
         && shown.empty === empty && shown.emptyDetail === emptyDetail && shown.emptyKind === emptyKind && shown.playbackUnavailable === playbackUnavailable
-        && sameStrings(shown.notes, notes) && sameStrings(shown.warnings, warnings);
-      if (sameBody && shown.summaryText === summaryText && shown.summaryPartial === summaryPartial) return;
+        && sameNotes;
+      const sameSummary = shown.summaryText === summaryText && shown.summaryPartial === summaryPartial;
+      if (sameBody && sameSummary && sameWarnings) return;
       const next: FamilyMetaState = { mode, reason, failureOrigin, empty, emptyDetail, emptyKind, ...(playbackUnavailable ? { playbackUnavailable } : {}), summaryText, summaryPartial, notes, warnings };
       metaRef.current = next;
-      if (sameBody && shown.summaryText?.trim() && summaryText?.trim() && !summaryPartial && !shown.summaryPartial && !notes.length) {
-        const label = summaryText.trim();
-        if (headerSummaryRef.current) headerSummaryRef.current.textContent = label;
+      const diagnostics = latestRef.current.onDiagnostics;
+      if (diagnostics && (!sameWarnings || !sameNotes)) diagnostics(mergeDiagnosticNotes(latestRef.current.extraWarnings, warnings, notes));
+      if (sameBody && sameSummary) return;
+      if (sameBody && shown.summaryPartial === summaryPartial && shown.summaryText?.trim() && summaryText?.trim()) {
+        syncHeaderSummary(headerSummaryRef.current, resolveHeaderSummary(next));
         return;
       }
       setMeta(next);
@@ -1781,9 +1788,10 @@ export default function FamilyHost<TModel = unknown, TOptions = unknown, TBindin
 
   useEffect(() => {
     if (!onDiagnostics) return;
-    onDiagnostics(mergeDiagnosticNotes(extraWarnings, meta.warnings, meta.notes));
+    const { warnings, notes } = metaRef.current;
+    onDiagnostics(mergeDiagnosticNotes(extraWarnings, warnings, notes));
     return () => onDiagnostics([]);
-  }, [onDiagnostics, extraWarnings, meta.warnings, meta.notes]);
+  }, [onDiagnostics, extraWarnings]);
 
   const onKeyDown = useCallback((event: ReactKeyboardEvent) => {
     const priorPending = pendingOrdinalRef.current;
@@ -1995,6 +2003,9 @@ export default function FamilyHost<TModel = unknown, TOptions = unknown, TBindin
   const headerSummary = meta.mode === 'picture' && !meta.empty && !bodyStateNode
     ? resolveHeaderSummary(metaRef.current)
     : null;
+  useLayoutEffect(() => {
+    syncHeaderSummary(headerSummaryRef.current, headerSummary);
+  }, [headerSummary, headerSlot]);
   const rowsFocus = (adapter.mirrorFocus ?? 'body') === 'rows';
   const bodyRole = mirrorKind === 'listbox' ? 'listbox' : adapter.navigation === 'grid' ? 'grid' : 'region';
   const bodyFocus = rowsFocus

@@ -103,7 +103,9 @@ const clock = new PlaybackController();
 const paintsByWidget = new Map<number, number>();
 let payloadTips = false;
 let hoverRanking: readonly string[] | null = null;
-let mirrorMetaOverride: { readonly summaryText: string; readonly summaryPartial: string | null } | null = null;
+let mirrorMetaOverride: { readonly summaryText: string; readonly summaryPartial: string | null; readonly warnings?: readonly string[] } | null = null;
+let reportGenericDiagnostics: ((lines: string[]) => void) | undefined;
+let genericHeader: HTMLDivElement | null = null;
 let dropNextPopulatedMirror = false;
 const hoverReports: Array<readonly [number | null, readonly string[] | undefined]> = [];
 let holdHitsForPipe: number | null = null;
@@ -158,7 +160,7 @@ function createLane(): LaneWorker {
             ...(mirrorMetaOverride ? {
               meta: {
                 value: { ...(painted.fields.meta?.value as Record<string, unknown> | undefined), ...mirrorMetaOverride },
-                content: `${mirrorMetaOverride.summaryText}|${mirrorMetaOverride.summaryPartial ?? ''}`,
+                content: JSON.stringify(mirrorMetaOverride),
               },
             } : {}) };
           if (payloadTips && 'focusTooltip' in fields) fields.focusTooltip = asPayloadTip(fields.focusTooltip) as PaintedField;
@@ -661,6 +663,8 @@ function renderApp() {
                   pin={null}
                   bounds={BOUNDS}
                   onActivate={action => { genericActivated.push(action); }}
+                  onDiagnostics={lines => reportGenericDiagnostics?.(lines)}
+                  headerSlot={genericHeader}
                   blockedState={currentState.genericBlocked ? <div data-blocked="true">Not yet</div> : null}
                   keepFollowingWhenBlocked={currentState.genericKeepFollowing}
                   onViewportChange={viewport => { genericViewports.push(viewport.width); }}
@@ -976,6 +980,7 @@ window.hostDom = {
   async testGenericHostFrames() {
     hoverRanking = ['NEW', 'OLD'];
     hoverReports.length = 0;
+    genericHeader = document.body.appendChild(document.createElement('div'));
     currentState = { ...currentState, genericMounted: true };
     renderApp();
     let pipeG = -1;
@@ -987,6 +992,7 @@ window.hostDom = {
     });
     const subsG = subsForPipe(pipeG);
     await until(() => subsG.length === 2 && subsG.every(id => pipeline.status(id).status === 'followed'));
+    mirrorMetaOverride = { summaryText: '4 countries', summaryPartial: 'Count from recorded hours' };
     clock.seek(100);
     seek = clock.getSnapshot().seekSequence;
     sendHour(subsG, 100, [90n, 70n, 50n, 30n], true);
@@ -1020,18 +1026,35 @@ window.hostDom = {
     const steadyStartCommits = genericCommits;
     const steadyStartBinds = bindCount;
     const steadyStartPaints = paintsByWidget.get(pipeG) ?? 0;
+    const reported = new Promise<string[]>(resolve => {
+      reportGenericDiagnostics = lines => { if (lines.includes('Recorded warning 19')) resolve(lines); };
+    });
     let factories = 90n;
     for (let i = 0; i < 20; i++) {
       factories += 5n;
+      mirrorMetaOverride = { summaryText: `${i + 4} countries`, summaryPartial: 'Count from recorded hours', warnings: [`Recorded warning ${i}`] };
       hoverRanking = i % 2 ? ['NEW', 'OLD'] : ['OLD', 'NEW'];
       sendHour(subsG, clock.getSnapshot().hour, [factories, 70n, 50n, 30n]);
       await frames(1);
     }
-    await frames(4);
+    const diagnosticLines = await reported;
+    reportGenericDiagnostics = undefined;
     const steady = {
       commits: genericCommits - steadyStartCommits,
       binds: bindCount - steadyStartBinds,
       paints: (paintsByWidget.get(pipeG) ?? 0) - steadyStartPaints,
+      diagnosticLines,
+      title: genericHeader.textContent,
+    };
+
+    mirrorMetaOverride = { summaryText: '4 countries', summaryPartial: 'Some countries were not recorded' };
+    const restoredTitle = waitForPipeInstall(pipeG, () =>
+      (pipeline.view(pipeG)?.fields?.meta as { summaryPartial?: string } | undefined)?.summaryPartial === 'Some countries were not recorded');
+    sendHour(subsG, clock.getSnapshot().hour, [factories + 1n, 70n, 50n, 30n]);
+    await restoredTitle;
+    const titleAfterPartialChange = {
+      label: genericHeader.textContent,
+      tooltip: genericHeader.querySelector('.fh-summary')?.getAttribute('data-tooltip'),
     };
 
     clock.setPlaying(false);
@@ -1059,15 +1082,19 @@ window.hostDom = {
     await until(() => hoverReports.at(-1)?.[1]?.[0] === 'NEXT');
     const rankedHovers = [...hoverReports];
     hoverRanking = null;
+    mirrorMetaOverride = null;
 
     currentState = { ...currentState, genericMounted: false };
     renderApp();
+    genericHeader.remove();
+    genericHeader = null;
     return {
       firstPicture,
       rankedHovers,
       mountCommits,
       quiet,
       steady,
+      titleAfterPartialChange,
       paused,
       activatedSubject: activated?.subject ?? null,
       activatedMatchesInstalled: !!activated && activated.installedId === installed?.id,

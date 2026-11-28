@@ -2902,7 +2902,18 @@ test('the table host adapter stores and resolves table settings through its decl
 
   const subject = (taken: Value) => ({ hideHeader: true, subjectSummary: { name: knownValue('298. Division'), country: knownValue('Germany'), detail: knownValue('Infantry'),
     level: knownValue('Regular'), figures: [{ label: 'Casualties taken', value: taken }, { label: 'Enemy killed', value: notRecorded('Kills are not recorded') }] } });
-  const widths = { widths: {}, totalWidth: 640 };
+  const widths = { widths: { a: 80 }, visible: ['a'], scrollable: false, totalWidth: 640 };
+  const panes = { width: 640, titles: [] };
+  const chrome = { columns, summaryText: '3 events', summaryPartial: 'Count from recorded hours' };
+  const initialChrome = tableHostAdapter.chromeState!({ meta: chrome, widths, panes }, undefined);
+  const withMoreRows = { ...chrome, columns: structuredClone(columns), summaryText: '4 events' };
+  assert.equal(tableHostAdapter.chromeState!({ meta: withMoreRows, widths, panes }, initialChrome), initialChrome,
+    'a changed title count leaves the header controls untouched');
+  assert.notEqual(tableHostAdapter.chromeState!({ meta: { ...chrome, columns: [] }, widths, panes }, initialChrome), initialChrome);
+  assert.equal(tableHostAdapter.chromeState!({ meta: chrome, widths: { ...widths, totalWidth: 700 }, panes }, initialChrome), initialChrome);
+  assert.notEqual(tableHostAdapter.chromeState!({ meta: chrome, widths: { ...widths, widths: { a: 100 } }, panes }, initialChrome), initialChrome);
+  assert.notEqual(tableHostAdapter.chromeState!({ meta: chrome, widths, panes: { ...panes, width: 700 } }, initialChrome), initialChrome);
+
   const first = tableHostAdapter.chromeState!({ meta: subject(knownValue(1904)), widths }, undefined) as TableChromeState;
   const written: string[][] = [];
   first.figures.attach(texts => { written.push([...texts]); });
@@ -2911,6 +2922,8 @@ test('the table host adapter stores and resolves table settings through its decl
   assert.equal(fought, first, 'a summary figure that only changes its number keeps the chrome state, so playback commits nothing');
   assert.equal(tableHostAdapter.chromeState!({ meta: foughtMeta, widths }, first), first);
   assert.deepEqual(written, [['1,904'], ['2,536']], 'and the new number is written to the band once');
+  assert.equal(tableHostAdapter.chromeState!({ meta: subject(knownValue(1904)), widths }, first), first);
+  assert.deepEqual(written.at(-1), ['1,904'], 'a seek back restores the first figure without rebuilding chrome');
   assert.notEqual(tableHostAdapter.chromeState!({ meta: subject(notRecorded('Casualties not recorded')), widths }, first), first, 'a figure that stops being recorded rebuilds the band');
 });
 

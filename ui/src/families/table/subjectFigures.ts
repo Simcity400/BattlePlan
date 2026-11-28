@@ -41,6 +41,7 @@ export class SubjectFigures {
     const split = figureShape(meta);
     if (!split || split.shape !== this.shape) return false;
     this.seen = meta;
+    if (split.texts.length === this.texts.length && split.texts.every((text, i) => text === this.texts[i])) return true;
     this.texts = split.texts;
     this.writer?.(split.texts);
     return true;

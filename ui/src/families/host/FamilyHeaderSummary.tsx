@@ -1,6 +1,13 @@
 import type { Ref } from 'react';
 import type { HeaderSummary } from './headerSummary.ts';
 
+export function syncHeaderSummary(node: HTMLSpanElement | null, summary: HeaderSummary | null) {
+  if (!node || !summary) return;
+  const text = node.firstChild;
+  if (text && text.nodeValue !== summary.label) text.nodeValue = summary.label;
+  if (summary.hasMarker && node.getAttribute('aria-label') !== summary.spoken) node.setAttribute('aria-label', summary.spoken);
+}
+
 export function FamilyHeaderSummary({ summary, ref }: { readonly summary: HeaderSummary | null; readonly ref?: Ref<HTMLSpanElement> }) {
   if (!summary) return null;
   if (summary.hasMarker && summary.tooltip) {

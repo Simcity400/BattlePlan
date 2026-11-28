@@ -3,11 +3,11 @@ import { createPortal } from 'react-dom';
 import type { FamilyChromeProps } from '../host/FamilyHost.tsx';
 import { syncTableEdges } from './edges.ts';
 import type { TableChromeState } from './hostAdapter.ts';
-import { buildColumnLayouts, columnInset, layoutFamilyTable, type TableRhythm } from './layout.ts';
+import { buildColumnLayouts, columnInset, layoutFamilyTable } from './layout.ts';
 import LogKindFilter from './LogKindFilter.tsx';
 import { LOG_SEARCH_OPTION } from './logHelpers.ts';
 import SubjectSummary from './SubjectSummary.tsx';
-import type { TableColumnSpec, TableModel } from './model.ts';
+import type { TableColumnSpec } from './model.ts';
 import { updateTableSettings, type TableSettings } from './settings.ts';
 import { columnWidthVar, DISPLAY_LABELS, FamilyTableHeader, type TableHeaderColumn, type TableHeaderIdentity } from './TableHeader.tsx';
 import './tableFamily.css';
@@ -16,34 +16,12 @@ const HEADER_FALLBACK_WIDTH = 120;
 const NO_COLUMNS: readonly TableColumnSpec[] = [];
 const NO_WIDTHS: Readonly<Record<string, number>> = {};
 
-interface ChromeMeta {
-  readonly subjectSummary?: TableModel['subjectSummary'];
-  readonly kindFilter?: TableModel['kindFilter'];
-  readonly hideHeader?: boolean;
-  readonly searchable?: boolean;
-  readonly search?: string;
-  readonly rhythm?: TableRhythm;
-  readonly unsorted?: boolean;
-  readonly rankShown?: boolean;
-  readonly rankWidth?: number;
-  readonly hasTree?: boolean;
-  readonly columns?: readonly TableColumnSpec[];
-}
-
 interface ChromePanes {
   readonly width: number;
   readonly gutter: number;
   readonly xs: readonly number[];
   readonly tableWidth: number;
   readonly titles: readonly (TableHeaderIdentity & { readonly key: string })[];
-}
-
-interface ChromeWidths {
-  readonly widths: Readonly<Record<string, number>>;
-  readonly visible: readonly string[];
-  readonly totals?: readonly string[];
-  readonly scrollable: boolean;
-  readonly pinnedCount?: number;
 }
 
 function LogSearch({ value, onChange }: { readonly value: string; readonly onChange: (key: string, value: string) => void }) {
@@ -67,8 +45,8 @@ function LogSearch({ value, onChange }: { readonly value: string; readonly onCha
 
 export default function TableChrome({ state, settings, onSettings, editable, viewportWidth, bodyBlocked, announce, targets, shownHour, filterSlot, setFilterOption }: FamilyChromeProps<TableSettings>) {
   const chrome = state as TableChromeState | undefined;
-  const meta = (chrome?.meta ?? {}) as ChromeMeta;
-  const measured = chrome?.widths as ChromeWidths | undefined;
+  const meta = chrome?.meta ?? {};
+  const measured = chrome?.widths;
   const panes = chrome?.panes as ChromePanes | undefined;
   const columns = meta.columns ?? NO_COLUMNS;
   const [scrollLeft, setScrollLeft] = useState(0);
