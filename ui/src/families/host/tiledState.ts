@@ -81,8 +81,27 @@ export const NO_TILED_SERIES: TiledSeriesMap = Object.freeze({});
 
 export function reuseTiledSeries(
   previous: TiledSeriesMap,
-  views: ReadonlyMap<string, Pick<TileView, 'current'>>,
+  views: ReadonlyMap<string, Pick<TileView, 'current' | 'rankSource' | 'top' | 'usesFollowedRank'>>,
+  ready = true,
 ): TiledSeriesMap {
+  if (!ready) {
+    let next: Record<string, ReadonlyMap<string, TiledLine>> | undefined;
+    for (const [name, held] of Object.entries(previous)) {
+      const view = views.get(name);
+      if (view?.rankSource === undefined) continue;
+      const rank = view.usesFollowedRank ? view.top : null;
+      if (!rank) {
+        next ??= { ...previous };
+        delete next[name];
+        continue;
+      }
+      const tags = new Set(rank.tags);
+      if ([...held.keys()].every(tag => tags.has(tag))) continue;
+      next ??= { ...previous };
+      next[name] = new Map([...held].filter(([tag]) => tags.has(tag)));
+    }
+    return next ? (Object.keys(next).length ? next : NO_TILED_SERIES) : previous;
+  }
   let count = 0;
   let same = true;
   for (const [name, tv] of views) {

@@ -121,7 +121,7 @@ export class TileView {
     return `${this.cacheLane.id}${this.lane.marks ? '|marks' : ''}|${binHours}|${index}|${tag}${spans ? `|${JSON.stringify(spans)}` : ''}`;
   }
 
-  get current(): ReadonlyMap<string, TiledLine> | null { return this.lines; }
+  get current(): ReadonlyMap<string, TiledLine> | null { return this.assembled ? this.lines : null; }
   get settled(): boolean {
     return this.lines !== null && this.wanted !== null && this.assembled !== null
       && this.assembled.binHours === this.wanted.binHours
@@ -216,7 +216,8 @@ export class TileView {
       this.rankPending = false;
       if (this.rankFailedHour !== null) this.failure = null;
       this.rankFailedHour = null;
-      this.setRank(null);
+      if (!follow || !this.ranked || hour < this.ranked.from || hour > this.ranked.until) this.setRank(null);
+      else if (this.failure !== this.told.failure) this.notify();
     }
     this.rankHour = hour;
     if (follow) return;
@@ -246,7 +247,6 @@ export class TileView {
     this.assemble();
     if (!rank || !this.settled || this.lines?.size !== rank.tags.length
       || [...(this.lines?.keys() ?? [])].some((tag, at) => tag !== rank.tags[at])) {
-      this.lines = null;
       this.assembled = null;
       this.notify();
     }
@@ -393,6 +393,7 @@ export class TileView {
     const wanted = this.wanted;
     if (this.closed || !wanted) return;
     if (this.lane.top && !this.ranked) return;
+    const wasSettled = this.settled;
     const tiles: Tile[][] = [];
     for (const tag of this.tags) {
       const own: Tile[] = [];
@@ -420,7 +421,7 @@ export class TileView {
     this.assembled = { binHours: wanted.binHours, first: wanted.first, last: wanted.last, width: wanted.width, cell: wanted.cell };
     this.failure = null;
     if (
-      same
+      same && wasSettled
       && this.told.failure === null
       && this.told.refused === (this.ranked?.refused ?? null)
       && this.told.from === (this.ranked?.from ?? null)

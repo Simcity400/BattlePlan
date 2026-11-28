@@ -9,6 +9,7 @@ export const { projection: armyLinesProjection, declaration: armyLinesDeclaratio
   title: 'Army size',
   subject: 'army size',
   format: 'compact',
+  slotBackedRank: true,
   aux: {
     product: 'army-size',
     label: 'the army types',

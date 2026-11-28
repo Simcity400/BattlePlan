@@ -300,7 +300,7 @@ test('a failing top-rank read does not re-ask the same hour when setHour runs ag
   const top: TileLane = { ...base, top: { ask(binHours, index, hour) {
     asked.push(hour);
     if (fail) return Promise.reject(new Error('not recorded'));
-    return Promise.resolve({ ...reply(['GER'], binHours, index, LAST, value), ranking: { hour, from: 0, until: LAST, refused: null } });
+    return Promise.resolve({ ...reply(['GER'], binHours, index, LAST, value), ranking: { hour, from: 0, until: hour + 49, refused: null } });
   } } };
   let changes = 0;
   let currentHour = 100;
@@ -339,6 +339,20 @@ test('a failing top-rank read does not re-ask the same hour when setHour runs ag
   await settle();
   assert.equal(followed.settled, true);
   assert.deepEqual(asked, [100, 200, 200, 300]);
+
+  fail = false;
+  followed.setHour(300, false);
+  await settle();
+  const held = followed.current;
+  assert.ok(held);
+  fail = true;
+  followed.setHour(350, false);
+  await settle();
+  assert.ok(errors.at(-1) instanceof Error);
+  followed.setHour(300, true);
+  assert.equal(errors.at(-1), null, 'Play republishes the cleared error alongside the proved rank');
+  assert.equal(followed.current, held);
+  assert.deepEqual(asked, [100, 200, 200, 300, 300, 350]);
   followed.close();
 });
 

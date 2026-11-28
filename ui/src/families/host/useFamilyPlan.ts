@@ -609,10 +609,11 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
   const [tiledState, setTiledState] = useState<{
     readonly key: string;
     readonly series: Readonly<Record<string, ReadonlyMap<string, TiledLine>>>;
+    readonly ready: boolean;
     readonly revision: number;
     readonly error: unknown;
     readonly topRefused?: string | null;
-  }>({ key: '', series: {}, revision: 0, error: null });
+  }>({ key: '', series: {}, ready: false, revision: 0, error: null });
 
   const planForTilesRef = useRef(plan);
   planForTilesRef.current = plan;
@@ -623,11 +624,13 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
   gateRecordedRef.current = gate.recorded;
 
   const applySeriesViewportRef = useRef<((vp: TileViewport) => void) | null>(null);
+  const updateTileViewsRef = useRef<((update: (view: TileView) => void) => void) | null>(null);
 
   useEffect(() => {
     const currentPlan = planForTilesRef.current;
     if (!active || !pixelBinnedKey || !currentPlan) {
       applySeriesViewportRef.current = null;
+      updateTileViewsRef.current = null;
       tileViewsKeyRef.current = '';
       for (const view of tileViewsRef.current.values()) view.close();
       tileViewsRef.current.clear();
@@ -658,9 +661,9 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
         if (!tv.usesFollowedRank) topRefused ??= tv.top?.refused ?? null;
       }
       if (!hasFollowedRanks && !allReady && firstError === null && topRefused === null) return;
-      heldSeries = allReady ? reuseTiledSeries(heldSeries, views) : NO_TILED_SERIES;
+      heldSeries = allReady || hasFollowedRanks ? reuseTiledSeries(heldSeries, views, allReady) : NO_TILED_SERIES;
       rev++;
-      const snapshot = { key: pixelBinnedKey, series: heldSeries, revision: rev, error: firstError, topRefused };
+      const snapshot = { key: pixelBinnedKey, series: heldSeries, ready: allReady, revision: rev, error: firstError, topRefused };
       inFrame(() => {
         if (!disposed) setTiledState(snapshot);
       });
@@ -673,12 +676,17 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
     }
     tileViewsRef.current = views;
     tileViewsKeyRef.current = pixelBinnedKey;
-    const applyViewport = (vp: TileViewport) => {
+    const batchUpdates = (update: (view: TileView) => void) => {
       batching = true;
       dirty = false;
-      for (const tv of views.values()) tv.setView(vp);
-      batching = false;
-      if (dirty) publish();
+      try { views.forEach(update); } finally {
+        batching = false;
+        if (dirty) publish();
+      }
+    };
+    updateTileViewsRef.current = batchUpdates;
+    const applyViewport = (vp: TileViewport) => {
+      batchUpdates(tv => tv.setView(vp));
       if (strips) setStripTileConfig(JSON.stringify([pixelBinnedKey, vp.width, vp.rolling, [...views.values()].map(view => view.stripBasis)]));
     };
     applySeriesViewportRef.current = applyViewport;
@@ -686,6 +694,7 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
     return () => {
       disposed = true;
       if (applySeriesViewportRef.current === applyViewport) applySeriesViewportRef.current = null;
+      if (updateTileViewsRef.current === batchUpdates) updateTileViewsRef.current = null;
       for (const tv of views.values()) tv.close();
       if (tileViewsRef.current === views) {
         tileViewsRef.current = new Map();
@@ -697,12 +706,12 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
   const onFollowedTileRanks = useCallback((hour: number, proof: readonly [number, number], ranks: TileRosters | undefined) => {
     if (!following || !runtime.clock.getSnapshot().playing || tileViewsKeyRef.current !== pixelBinnedKey) return;
     const recorded = gateRecordedRef.current(hour) !== null;
-    for (const tv of tileViewsRef.current.values()) {
-      if (tv.rankSource === undefined) continue;
+    updateTileViewsRef.current?.(tv => {
+      if (tv.rankSource === undefined) return;
       tv.setHour(hour, true);
       const rank = recorded ? ranks?.[tv.rankSource] : undefined;
       tv.setFollowedRank(hour, rank ? { ...rank, hour, from: proof[0], until: proof[1] } : null);
-    }
+    });
   }, [following, runtime.clock, pixelBinnedKey]);
 
   const onSeriesViewport = useCallback((nextViewport: TileViewport) => {
@@ -867,7 +876,7 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
       const at = now();
       if (gateRecordedRef.current(at) === null) return;
       const playing = following && hasFollowedRanks && runtime.clock.getSnapshot().playing;
-      for (const tv of tops) tv.setHour(at, playing);
+      updateTileViewsRef.current?.(tv => { if (tv.isTop) tv.setHour(at, playing); });
     };
     apply();
     if (!following) return;
@@ -885,11 +894,12 @@ export function useFamilyPlan<TAux = unknown, TExtra = undefined>(
     return () => { stop(); stopMode?.(); };
   }, [active, following, tileHour, pixelBinnedKey, currentTiled?.revision, runtime.clock, track, trackOffset, hasFollowedRanks]);
   const tileUnrecordedRef = useRef<HeldTileUnrecorded | null>(null);
+  const completedTiledSeries = currentTiled?.ready ? currentTiledSeries : undefined;
   const tileUnrecorded = useMemo(() => {
-    const held = reuseTileUnrecorded(tileUnrecordedRef.current, currentTiledSeries, tileHour);
+    const held = reuseTileUnrecorded(tileUnrecordedRef.current, completedTiledSeries, tileHour);
     tileUnrecordedRef.current = held;
     return held?.result ?? null;
-  }, [currentTiledSeries, tileHour]);
+  }, [completedTiledSeries, tileHour]);
   const tileLo = tileUnrecorded?.validInterval[0];
   const tileHi = tileUnrecorded?.validInterval[1];
   useEffect(() => {

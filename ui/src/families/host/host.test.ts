@@ -5,6 +5,9 @@ import test from 'node:test';
 import { tooltipStore, tooltipText } from '../../charts/tooltip.ts';
 import { formatDateHover } from '../valueFormat.ts';
 import { engineHour } from '../../dashboard/calendar.ts';
+import { TileCache } from '../../dashboard/tiles/cache.ts';
+import { TILE_BINS } from '../../dashboard/tiles/tile.ts';
+import { TileView } from '../../dashboard/tiles/view.ts';
 import type { Pipeline, PointerHitMeta } from '../../dashboard/follow/pipeline.ts';
 import { AuditSnapshotStore } from '../audit.ts';
 import { barsHostAdapter, parseBarsHit } from '../bars/hostAdapter.ts';
@@ -2333,7 +2336,7 @@ test('ranking interval updates preserve tiled series identity and reuse valid un
     marks: null,
   });
   const firstMap = new Map<string, TiledLine>([['AAA', line('AAA')]]);
-  const views = new Map([['main', { current: firstMap }]]);
+  const views = new Map([['main', { current: firstMap, rankSource: undefined, top: null, usesFollowedRank: false }]]);
   const s1 = reuseTiledSeries(NO_TILED_SERIES, views);
   const s2 = reuseTiledSeries(s1, views);
   assert.equal(s2, s1, 'unchanged line maps keep the exact series reference so downstream serialization does not re-run');
@@ -2345,6 +2348,71 @@ test('ranking interval updates preserve tiled series identity and reuse valid un
   const u3 = reuseTileUnrecorded(u2, s2, 25);
   assert.notEqual(u3, u2);
   assert.equal(u3?.result?.reason, null);
+});
+
+test('a followed roster publishes retained lines while an entering country tile is pending', async () => {
+  const requests: string[][] = [];
+  let letEnter!: () => void;
+  const entering = new Promise<void>(resolve => { letEnter = resolve; });
+  let shown = NO_TILED_SERIES;
+  let ranked = 0;
+  const reply = (binHours: number, index: number, tags: readonly string[]) => {
+    const firstHour = index * TILE_BINS * binHours;
+    return {
+      branchId: '1', measure: 'value', decimals: 0, binHours, index, firstHour,
+      immutable: true, filled: firstHour + TILE_BINS * binHours - 1, rawValues: true, hourBytes: 0,
+      lines: tags.map(country => ({ country, missing: [], partial: [], parts: [] })), bins: new Uint8Array(tags.length * TILE_BINS),
+    };
+  };
+  const view: TileView = new TileView(new TileCache(), {
+    key: 'ranked test', lastHour: 600, tags: [], followRank: 'head',
+    top: { ask: async (binHours, index, hour) => {
+      ranked++;
+      return { ...reply(binHours, index, ['AAA', 'BBB']), ranking: { hour, from: 299, until: 309, refused: null } };
+    } },
+    ask: async (binHours, index, tags) => {
+      requests.push([...tags]);
+      if (tags.includes('CCC')) await entering;
+      return reply(binHours, index, tags);
+    },
+  }, () => { shown = reuseTiledSeries(shown, views, view.settled); });
+  const views = new Map([['main', view]]);
+  const rank = (hour: number, tags: string[]) => {
+    view.setHour(hour, true);
+    view.setFollowedRank(hour, { hour, from: hour, until: hour, tags, refused: null });
+  };
+  try {
+    view.setView({ from: 290, to: 345, end: 345, width: 100 });
+    view.setHour(299, false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const original = shown.main?.get('AAA');
+    assert.ok(original);
+    assert.deepEqual([...shown.main!.keys()], ['AAA', 'BBB']);
+
+    const paused = shown;
+    view.setHour(300, true);
+    assert.equal(shown, paused, 'the dated rank still proves membership at the first played hour');
+    rank(300, ['AAA', 'BBB']);
+
+    rank(310, ['AAA', 'CCC']);
+    assert.equal(view.settled, false);
+    assert.deepEqual([...(shown.main?.keys() ?? [])], ['AAA']);
+    assert.equal(shown.main!.get('AAA'), original);
+    assert.deepEqual(requests, [['CCC']]);
+    assert.equal(ranked, 1, 'only the paused rank makes a ranked request');
+
+    letEnter();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(view.settled, true);
+    assert.deepEqual([...shown.main!.keys()], ['AAA', 'CCC']);
+    assert.equal(shown.main!.get('AAA'), original, 'the surviving line also reuses its assembled buckets');
+
+    view.setFollowedRank(320, null);
+    assert.equal(shown, NO_TILED_SERIES, 'an absent rank provides no proof of retained line membership');
+  } finally {
+    letEnter();
+    view.close();
+  }
 });
 
 test('dated-at-hour widgets distinguish recorded empty hours from unobserved spans and retain pinned ever history (#1031)', () => {

@@ -7,5 +7,6 @@ export const { projection: airForceLinesProjection, declaration: airForceLinesDe
   title: 'Air force size',
   subject: 'air force size',
   format: 'number',
+  slotBackedRank: true,
   measure: options => airForceTotals(options),
 });
