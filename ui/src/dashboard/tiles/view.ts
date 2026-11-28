@@ -240,13 +240,15 @@ export class TileView {
       return;
     }
     this.ranked = rank;
-    if (before && rank && before.refused === rank.refused
-      && (before.tags === rank.tags || (before.tags.length === rank.tags.length && before.tags.every((tag, at) => tag === rank.tags[at])))) return;
+    if (before && rank && before.refused === rank.refused && before.tags.length === rank.tags.length) {
+      if (before.tags === rank.tags || before.tags.every((tag, at) => tag === rank.tags[at])) return;
+      const held = new Set(before.tags);
+      if (rank.tags.every(tag => held.has(tag))) return;
+    }
     this.repin();
     this.fetch();
     this.assemble();
-    if (!rank || !this.settled || this.lines?.size !== rank.tags.length
-      || [...(this.lines?.keys() ?? [])].some((tag, at) => tag !== rank.tags[at])) {
+    if (!rank || !this.settled || this.lines?.size !== rank.tags.length || !rank.tags.every(tag => this.lines?.has(tag))) {
       this.assembled = null;
       this.notify();
     }
@@ -405,15 +407,15 @@ export class TileView {
       tiles.push(own);
     }
     const span = TILE_BINS * wanted.binHours, from = wanted.first * span, to = (wanted.last + 1) * span - 1, cell = this.lane.marks === true ? wanted.cell : null;
-    const previous = this.lines ? [...this.lines.keys()] : [];
+    const previous = this.followingRank ? null : [...(this.lines?.keys() ?? [])];
     const lines = new Map<string, TiledLine>();
-    let same = this.lines !== null && previous.length === this.tags.length;
+    let same = this.lines?.size === this.tags.length;
     this.tags.forEach((tag, at) => {
       const held = this.lines?.get(tag);
       const made = held ? this.made.get(held) : undefined;
       const kept = made && made.from === from && made.to === to && made.width === wanted.width && made.cell === cell
         && made.tiles.length === tiles[at].length && made.tiles.every((tile, index) => tile === tiles[at][index]) ? held! : null;
-      if (!kept || previous[at] !== tag) same = false;
+      if (!kept || (previous && previous[at] !== tag)) same = false;
       const built = kept ?? line(tag, held?.head ?? tileHead(this.lane.key, tag), tiles[at], from, to, wanted.width, cell);
       if (!kept) this.made.set(built, { tiles: tiles[at], from, to, width: wanted.width, cell });
       lines.set(tag, built);
@@ -424,8 +426,7 @@ export class TileView {
       same && wasSettled
       && this.told.failure === null
       && this.told.refused === (this.ranked?.refused ?? null)
-      && this.told.from === (this.ranked?.from ?? null)
-      && this.told.until === (this.ranked?.until ?? null)
+      && (this.followingRank || (this.told.from === (this.ranked?.from ?? null) && this.told.until === (this.ranked?.until ?? null)))
     ) return;
     if (!same) this.lines = lines;
     this.notify();
