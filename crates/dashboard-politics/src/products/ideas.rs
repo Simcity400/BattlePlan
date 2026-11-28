@@ -1497,7 +1497,7 @@ impl Product for IdeaHistory {
         {
             KeyedVariables::for_source(source).prepare_country(span.run, id);
         }
-        ReadDates::prepare_scripted(source, span.run)
+        ReadDates::prepare_ideas(source, span.run, (span.first, span.last))
     });
     type Params = IdeaHistoryParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId, country, hour: Read];
