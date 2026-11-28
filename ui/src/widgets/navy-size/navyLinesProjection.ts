@@ -7,5 +7,6 @@ export const { projection: navyLinesProjection, declaration: navyLinesDeclaratio
   title: 'Navy size',
   subject: 'navy size',
   format: 'number',
+  slotBackedRank: true,
   measure: options => navyTotals(options),
 });

@@ -85,6 +85,7 @@ export interface CountryLinesSpec<TAux = unknown> {
   readonly subject: string;
   readonly format: Extract<ChartValueFormat, 'compact' | 'number' | 'percent'>;
   readonly step?: boolean;
+  readonly slotBackedRank?: boolean;
   readonly aux?: AuxProductSpec<TAux>;
   readonly measure: (options: Readonly<Record<string, OptionValue>>, aux: TAux | undefined) => CountryLinesMeasure | CountryLinesUnavailable | null;
   readonly second?: (options: Readonly<Record<string, OptionValue>>) => CountryLinesSecond | null;
@@ -162,6 +163,7 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
   readonly projection: TimeChartProjection<CountryLinesOptions>;
   readonly declaration: TimeChartWidgetDeclaration<CountryLinesOptions, TAux>;
 } {
+  const followRank = spec.slotBackedRank ? {} : { followRank: 'main' };
   const projection: TimeChartProjection<CountryLinesOptions> = {
     kind: spec.kind,
     family: 'time-chart',
@@ -184,8 +186,8 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
         };
       }
       const top = options.top !== null;
+      const answered = top ? readView.answer('main') : undefined;
       if (top) {
-        const answered = readView.answer('main');
         const ranked = answered ? undefined : readView.panel<{ readonly refused?: string | null }>('main');
         const refused = readView.refused('main')
           ?? (answered?.kind === 'notRecorded' ? answered.reason : undefined)
@@ -202,6 +204,7 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
             series: [],
             empty: { message: refused, kind: 'unavailable' },
             auditRows: [auditRow('__rank__', refused)],
+            ...(!spec.slotBackedRank ? { followedTileRanks: { main: { tags: [], refused } } } : {}),
           };
         }
       }
@@ -209,6 +212,9 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
       const view = chartWindow(settings, hour, options.extent[0]);
       const drawn = readView.series('main');
       const population = top ? rankedCountries(readView, 'main') : null;
+      const followedTileRanks = !spec.slotBackedRank && answered && population
+        ? { main: { tags: [...population.rows.keys()].sort(), refused: null } }
+        : undefined;
       const tileHeads = top && !population && drawn
         ? new Map([...drawn].map(([tag, line]) => [tag, tileReadingAt(line, hour)]))
         : null;
@@ -230,6 +236,7 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
           series: [],
           empty: { message: `No ${spec.subject} recorded at this date.`, kind: 'empty' },
           auditRows: [],
+          ...(followedTileRanks ? { followedTileRanks } : {}),
         };
       }
       const present = tags.filter(tag => memberAt(options.membership, tag, hour));
@@ -329,6 +336,7 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
         yAxis: { format: spec.format, decimals: options.digits ?? options.decimals, exactDecimals: options.decimals, ...chartAxis(settings) },
         series,
         drawnKeys: options.second ? { main: ordered, second: ordered } : { main: ordered },
+        ...(followedTileRanks ? { followedTileRanks } : {}),
         ...(legend ? { legend } : {}),
         gaps: options.gaps.length > 0 ? options.gaps : undefined,
         ...(ranking.warnings.length > 0 ? { warnings: ranking.warnings } : {}),
@@ -389,6 +397,7 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
               family,
               tags: [],
               top: { n: top },
+              ...followRank,
               headQuery: { product: 'series-state', params },
               params: second ? { ...params, measures: [second.measure] } : params,
               exactProduct: 'series-rank',
@@ -404,6 +413,7 @@ export function buildCountryLinesView<TAux = unknown>(spec: CountryLinesSpec<TAu
                   family: secondFamily,
                   tags: [],
                   top: { n: top, by: measure.measure },
+                  ...followRank,
                 },
               }]
             : []),

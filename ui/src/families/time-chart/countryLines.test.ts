@@ -7,11 +7,13 @@ import type { GatedHour } from '../../dashboard/regionTime.ts';
 import { TileCache } from '../../dashboard/tiles/cache.ts';
 import { TILE_BINS } from '../../dashboard/tiles/tile.ts';
 import { TileView, type TileRoster } from '../../dashboard/tiles/view.ts';
-import { createBoundedReadView, displayedHour } from '../../families/boundedView.ts';
-import { chartTileLane } from '../../families/host/tiledState.ts';
-import type { FamilyPlanContext } from '../../families/plan.ts';
+import { createBoundedReadView, displayedHour } from '../boundedView.ts';
+import { chartTileLane } from '../host/tiledState.ts';
+import type { FamilyPlanContext } from '../plan.ts';
 import { parseFollowed } from '../../test-support/followMessage.ts';
-import { factoriesLinesDeclaration, factoriesLinesProjection } from './factoriesLinesProjection.ts';
+import { factoriesLinesDeclaration, factoriesLinesProjection } from '../../widgets/factories/factoriesLinesProjection.ts';
+import { navyLinesDeclaration } from '../../widgets/navy-size/navyLinesProjection.ts';
+import { occupationLinesDeclaration } from '../../widgets/occupation-trend/occupationLinesProjection.ts';
 
 test('played factory history uses the followed ranking and asks only for missing keyed tiles', async () => {
   const branch = { id: '1', firstHour: 100, lastHour: 600, gaps: [] };
@@ -20,6 +22,13 @@ test('played factory history uses the followed ranking and asks only for missing
     options: {}, countries: { top: 2, all: false, tags: [], holders: null, membership: null },
   } as unknown as FamilyPlanContext;
   const plan = factoriesLinesDeclaration.sources(ctx, { following: true, staticSpan: null });
+  const navy = navyLinesDeclaration.sources(ctx, { following: true, staticSpan: null }).entries.find(entry => entry.name === 'main');
+  assert.ok(navy?.read.shape === 'pixel-binned');
+  assert.equal(navy.read.followRank, undefined);
+  const all = { ...ctx, options: { measure: 'both' }, countries: { ...ctx.countries, top: null, all: true } } as const;
+  const occupation = occupationLinesDeclaration.sources(all, { following: true, staticSpan: null }).entries;
+  assert.deepEqual(occupation.flatMap(entry => entry.read.shape === 'pixel-binned' ? [[entry.name, entry.read.top?.n, entry.read.followRank]] : []),
+    [['main', 'all', 'main'], ['second', 'all', 'main']]);
   const entry = plan.entries.find(entry => entry.name === 'main')!;
   assert.ok(entry.read.shape === 'pixel-binned');
   assert.equal(entry.read.exactProduct, 'series-rank');
@@ -61,14 +70,15 @@ test('played factory history uses the followed ranking and asks only for missing
       : { hour: displayedHour(hour), answers: new Map([['main', answer]]) });
     const model = factoriesLinesProjection.project(view, options);
     const rank: TileRoster | undefined = model.followedTileRanks?.[rankSource];
-    assert.deepEqual(rank, { tags, refused });
+    const tileKeys = [...tags].sort();
+    assert.deepEqual(rank, { tags: tileKeys, refused });
     assert.deepEqual(model.series.map(series => series.key), tags);
     tiles.setHour(hour, true);
     tiles.setFollowedRank(hour, { ...rank!, hour, from: hour, until: hour });
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(tiles.settled, true);
     assert.ok(tiles.current);
-    assert.deepEqual([...tiles.current.keys()], tags);
+    assert.deepEqual([...tiles.current.keys()], tileKeys);
   }
   assert.equal(requests.filter(request => request.hour !== undefined).length, 0);
   assert.deepEqual(requests.map(request => request.countries), [[7, 8], [9]]);

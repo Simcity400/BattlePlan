@@ -32,6 +32,7 @@ const countryView = buildCountryLinesView({
   subject: 'territory',
   format: 'number',
   step: true,
+  slotBackedRank: true,
   digits: () => 0,
   measure: options => ({
     kind: 'territory',
