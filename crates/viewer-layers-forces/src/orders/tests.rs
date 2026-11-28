@@ -50,14 +50,14 @@ fn retiring_a_map_interrupts_an_orders_join_whose_rows_have_not_arrived() {
     let fed = Apart::new(&entry, 0).unwrap();
     let mut layer = Orders::new(Arc::new(Links));
     layer.set_views(fed.store()).unwrap();
-    let retire = layer.retirement();
+    let retire = layer.retirement().unwrap();
     let (waiting, at_wait) = mpsc::channel();
     layer.shared.lock().on_wait = Some(Box::new(move || waiting.send(()).unwrap()));
 
     let outcome = std::thread::scope(|scope| {
         let join = scope.spawn(move || layer.settle_at(1, Settling::still()));
         at_wait.recv().unwrap();
-        retire.stop();
+        retire();
         join.join().unwrap()
     });
 

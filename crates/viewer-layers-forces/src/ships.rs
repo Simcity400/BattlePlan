@@ -1,5 +1,5 @@
 
-use viewer_layer_core::layers::{Carried, Settling, Dirty, Inputs, Layer, List, Num, Published, Text, Upstream, View};
+use viewer_layer_core::layers::{Carried, Settling, Dirty, Inputs, Layer, List, Num, Published, Retirement, Text, Upstream, View};
 use viewer_layer_core::playhead_host::{Entry, mirror::{Cell, Mirror, Mirrors}, views::{Need, Recording, self}};
 use playhead::Step;
 use replay_columnar::manifest::Status;
@@ -107,6 +107,12 @@ struct Shared {
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Asked> {
         self.asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn stop(&self) {
+        self.lock().stop = true;
+        self.answered.notify_all();
+        self.wake.notify_all();
     }
 }
 
@@ -222,6 +228,9 @@ impl Rosters {
         }
         let (mut slices, mut timeouts) = (0_u64, 0_u64);
         loop {
+            if asked.stop {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
             if let Some(error) = asked.error.as_ref() {
                 return Err(io::Error::other(format!("The ship rosters' worker stopped: {error}")));
             }
@@ -273,8 +282,7 @@ impl Rosters {
 
 impl Drop for Rosters {
     fn drop(&mut self) {
-        self.shared.lock().stop = true;
-        self.shared.wake.notify_all();
+        self.shared.stop();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -1172,6 +1180,11 @@ impl Ships {
 }
 
 impl Layer for Ships {
+    fn retirement(&self) -> Option<Retirement> {
+        let shared = Arc::clone(&self.rosters.shared);
+        Some(Box::new(move || shared.stop()))
+    }
+
     fn name(&self) -> &'static str {
         "ships"
     }
@@ -1287,10 +1300,12 @@ impl Layer for Ships {
         if self.window
             && let Some(hour) = mirrors.get(TableId::TaskForces).and_then(Mirror::head)
         {
-            let answered = self.rosters.wait(hour, settling.waiting(Duration::from_secs(30))).is_ok();
+            let answered = self.rosters.wait(hour, settling.waiting(Duration::from_secs(30)));
             timeline::mark(self.rosters.maker, Mark::Waited);
-            if answered {
-                self.settle_dirty(mirrors);
+            match answered {
+                Ok(()) => self.settle_dirty(mirrors),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                Err(_) => {}
             }
         }
         timeline::mark(self.rosters.maker, Mark::Joined);

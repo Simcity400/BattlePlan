@@ -587,16 +587,17 @@ impl History {
         provenance
     }
 
-    pub fn folded(&self) {
+    pub fn wake_waiters(&self) {
+        drop(self.branches.lock().unwrap_or_else(|p| p.into_inner()));
         self.folded.notify_all();
     }
 
-    pub fn reached(&self, branch: BranchId, hour: Hour, viewer: u32, limit: Duration) -> Provenance {
+    pub fn reached_while(&self, branch: BranchId, hour: Hour, viewer: u32, limit: Duration, waiting: impl Fn() -> bool) -> Provenance {
         let until = Instant::now() + limit;
         let mut state = self.branches.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             let provenance = provenance_in(&state.held, branch, hour, viewer);
-            if provenance != Provenance::Pending || self.cancelled.load(Ordering::Acquire) {
+            if provenance != Provenance::Pending || self.cancelled.load(Ordering::Acquire) || !waiting() {
                 return provenance;
             }
             let Some(left) = until

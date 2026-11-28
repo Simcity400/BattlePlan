@@ -1,5 +1,5 @@
 
-use crate::layers::Published;
+use crate::layers::{Published, Retirement};
 use crate::playhead_host::{
     Entry,
     views::{Need, Recording},
@@ -171,6 +171,12 @@ impl<P> Shared<P> {
     fn lock(&self) -> MutexGuard<'_, State<P>> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn stop(&self) {
+        self.lock().stop = true;
+        self.built.notify_all();
+        self.wake.notify_all();
+    }
 }
 
 pub struct Rebuilt<P> {
@@ -319,6 +325,9 @@ impl<P: Send + Sync + 'static> Rebuilt<P> {
         let until = Instant::now() + limit;
         let mut state = self.shared.lock();
         loop {
+            if state.stop {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
             if let Some(built) = state.built.as_ref()
                 && built.of(hour)
                 && built.generation == state.generation
@@ -400,13 +409,10 @@ impl<P: Send + Sync + 'static> Rebuilt<P> {
 
 impl<P> Drop for Rebuilt<P> {
     fn drop(&mut self) {
-        let mut state = self.shared.lock();
-        state.stop = true;
+        self.shared.stop();
         if self.timed {
-            report(self.name, &state);
+            report(self.name, &self.shared.lock());
         }
-        drop(state);
-        self.shared.wake.notify_all();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -720,6 +726,11 @@ impl<B: Build> Whole<B> {
 }
 
 impl<B: Build> crate::layers::Layer for Whole<B> {
+    fn retirement(&self) -> Option<Retirement> {
+        let shared = Arc::clone(&self.rebuilt.shared);
+        Some(Box::new(move || shared.stop()))
+    }
+
     fn views(&mut self, store: &views::Store) -> io::Result<()> {
         self.rebuilt.set_views(store);
         Ok(())
@@ -810,10 +821,15 @@ impl<B: Build> crate::layers::Layer for Whole<B> {
                 () if self.exact && self.held.is_some() => WHOLE,
                 () => settling.waiting(WHOLE),
             };
-            if self.exact && !waiting.is_zero() && self.rebuilt.wait(hour, waiting).is_err() && self.rebuilt.stopped().is_none() {
-                self.behind = true;
-            } else if !self.exact {
-                let _ = self.rebuilt.wait(hour, waiting);
+            if (!self.exact || !waiting.is_zero())
+                && let Err(error) = self.rebuilt.wait(hour, waiting)
+            {
+                if error.kind() == io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+                if self.exact && self.rebuilt.stopped().is_none() {
+                    self.behind = true;
+                }
             }
         }
         if let Some(why) = self.rebuilt.stopped() {

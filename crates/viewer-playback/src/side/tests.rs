@@ -44,6 +44,17 @@ fn the_frames_window_never_waits_while_the_sides_thread_prepares_a_step() {
 }
 
 #[test]
+fn retiring_the_side_releases_a_layer_waiting_in_its_step() {
+    let composes = Arc::new(Mutex::new(0));
+    let (mut layer, stop, in_step) = Sum::held_settle(&composes);
+    layer.stop_on_retirement = Some(stop);
+    let side = side("retirement during a step", Box::new(layer));
+    side.ask(View::default(), Head::Stepped(5), None, None);
+    in_step.recv().expect("the layer is settling with the side held");
+    drop(side);
+}
+
+#[test]
 fn a_view_asked_between_two_steps_is_taken_at_the_next_one() {
     let composes = Arc::new(Mutex::new(0));
     let mut side = side("view between steps", Box::new(Sum::new(&composes)));

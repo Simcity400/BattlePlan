@@ -1,6 +1,6 @@
 
 use super::models::Select;
-use viewer_layer_core::{layers::Settling, rebuilt::{absent, refusal}, playhead_host::{Entry, timeline::{self, Mark}, views::{self, HeldKeys, Need}}};
+use viewer_layer_core::{layers::{RetirementFlag, Settling}, rebuilt::{absent, refusal}, playhead_host::{Entry, timeline::{self, Mark}, views::{self, HeldKeys, Need}}};
 use replay_data::{Hour, rows::TableId};
 use replay_frame::frame::{DecodedFrame, SharedView, TableView, discovering};
 use std::{
@@ -213,7 +213,7 @@ impl Meshes {
         timeline::mark(self.maker, Mark::Asked);
     }
 
-    pub fn join(&mut self, applied: Hour, settling: Settling) -> bool {
+    pub fn join(&mut self, applied: Hour, settling: Settling, retiring: &RetirementFlag) -> bool {
         let until = Instant::now() + settling.waiting(WHOLE);
         let strict = settling.strict();
         let mut changed = false;
@@ -222,10 +222,11 @@ impl Meshes {
             if self.shared.lock().answered.as_ref().is_some_and(|&at| at >= applied) && (!strict || self.stand()) {
                 return changed | self.take();
             }
-            if Instant::now() >= until {
+            let now = Instant::now();
+            if retiring.requested() || now >= until {
                 return changed;
             }
-            self.shared.wait(until);
+            self.shared.wait(until.min(now + RetirementFlag::POLL));
         }
     }
 

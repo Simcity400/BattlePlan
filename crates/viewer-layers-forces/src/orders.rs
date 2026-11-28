@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests;
 
-use viewer_layer_core::layers::{Carried, Inputs, Layer, Published, Settling, Upstream, View};
+use viewer_layer_core::layers::{Carried, Inputs, Layer, Published, Retirement, Settling, Upstream, View};
 use viewer_layer_core::playhead_host::{mirror::{Mirror, Mirrors}, timeline::{self, Mark}, views::{self, Need}};
 use playhead::Step;
 use replay_data::{Hour, rows::TableId};
@@ -141,14 +141,6 @@ impl Shared {
     fn stop(&self) {
         self.lock().stop = true;
         self.done.notify_all();
-    }
-}
-
-pub struct Retirement(Arc<Shared>);
-
-impl Retirement {
-    pub fn stop(self) {
-        self.0.stop();
     }
 }
 
@@ -335,10 +327,6 @@ impl Orders {
             Err(error) => self.shared.lock().stopped.set_some(format!("The orders layer is refused: its worker cannot start: {error}")),
         }
         Ok(())
-    }
-
-    pub fn retirement(&self) -> Retirement {
-        Retirement(Arc::clone(&self.shared))
     }
 
     pub fn in_window(mut self) -> Self {
@@ -537,6 +525,11 @@ impl Drop for Orders {
 }
 
 impl Layer for Orders {
+    fn retirement(&self) -> Option<Retirement> {
+        let shared = Arc::clone(&self.shared);
+        Some(Box::new(move || shared.stop()))
+    }
+
     fn name(&self) -> &'static str {
         "orders"
     }

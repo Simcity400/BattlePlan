@@ -191,8 +191,30 @@ pub fn drawn_layer<'a, T: 'static>(side: &'a crate::playhead_host::MapSide<impl 
     side.layer_parts().drawn(name)
 }
 
+pub type Retirement = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+pub struct RetirementFlag(Arc<AtomicBool>);
+
+impl RetirementFlag {
+    pub const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+    pub fn handle(&self) -> Retirement {
+        let requested = Arc::clone(&self.0);
+        Box::new(move || requested.store(true, Ordering::Release))
+    }
+
+    pub fn requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 pub trait Layer: Send {
     fn name(&self) -> &'static str;
+
+    fn retirement(&self) -> Option<Retirement> {
+        None
+    }
 
     fn placed(&mut self, view: &View) -> Option<u64> {
         let _ = view;

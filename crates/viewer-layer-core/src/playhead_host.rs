@@ -2182,6 +2182,10 @@ impl<P: PlaybackProducts> MapSide<P> {
         self.layer_parts().parts()
     }
 
+    pub fn layer_retirements(&self) -> Vec<crate::layers::Retirement> {
+        self.layers.iter().filter_map(|layer| layer.retirement()).collect()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn layers_mut(&mut self) -> &mut [Box<dyn Layer>] {
         &mut self.layers

@@ -1,5 +1,5 @@
 
-use crate::layers::{Carried, Settling, Inputs, Keys, Layer, List, Upstream, View};
+use crate::layers::{Carried, Settling, Inputs, Keys, Layer, List, Retirement, RetirementFlag, Upstream, View};
 use crate::playhead_host::mirror::{Mirror, Mirrors};
 use playhead::Step;
 use replay_columnar::manifest::Status;
@@ -41,6 +41,7 @@ impl Kind {
 
 pub struct Engagements {
     index: Option<Index>,
+    retiring: RetirementFlag,
     viewer: Option<u32>,
     reads_vision: bool,
     sides: Option<List>,
@@ -60,6 +61,7 @@ impl Engagements {
     pub fn new(index: Option<Index>, viewer: Option<u32>) -> Self {
         Self {
             index,
+            retiring: RetirementFlag::default(),
             viewer,
             reads_vision: false,
             sides: None,
@@ -239,31 +241,45 @@ impl Engagements {
         std::mem::replace(&mut self.statuses, held) != held
     }
 
-    fn wait_for_the_fold(&self, mirrors: &Mirrors, settling: Settling) {
-        let (Some(index), Some(viewer), true) = (&self.index, self.viewer, settling.strict()) else { return };
+    fn wait_for_the_fold(&self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
+        let (Some(index), Some(viewer), true) = (&self.index, self.viewer, settling.strict()) else { return Ok(()) };
         for kind in [LAND, NAVAL] {
             if let Some(head) = self.head(mirrors, kind) {
                 #[cfg(test)]
                 self.fold_waits.set(self.fold_waits.get() + 1);
-                index.history.reached(index.branch, head, viewer, WHOLE);
+                index.history.reached_while(index.branch, head, viewer, WHOLE, || !self.retiring.requested());
+                if self.retiring.requested() {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
             }
         }
+        Ok(())
     }
 
-    fn settle_flags(&mut self, mirrors: &Mirrors, settling: Settling) {
+    fn settle_flags(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         if self.take_statuses(mirrors) {
             self.read_all();
         }
-        self.wait_for_the_fold(mirrors, settling);
+        self.wait_for_the_fold(mirrors, settling)?;
         self.take_player(mirrors);
         for kind in [LAND, NAVAL] {
             self.mark(mirrors, kind);
             self.settle_kind(mirrors, kind);
         }
+        Ok(())
     }
 }
 
 impl Layer for Engagements {
+    fn retirement(&self) -> Option<Retirement> {
+        let history = Arc::clone(&self.index.as_ref()?.history);
+        let stop = self.retiring.handle();
+        Some(Box::new(move || {
+            stop();
+            history.wake_waiters();
+        }))
+    }
+
     fn name(&self) -> &'static str {
         "engagements"
     }
@@ -287,7 +303,7 @@ impl Layer for Engagements {
     fn compose(&mut self, mirrors: &Mirrors) -> io::Result<()> {
         let marked = self.marked;
         self.read_all();
-        self.settle_flags(mirrors, Settling::step());
+        self.settle_flags(mirrors, Settling::step())?;
         self.marked = marked;
         Ok(())
     }
@@ -340,8 +356,7 @@ impl Layer for Engagements {
 
     fn settle(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         self.frame += 1;
-        self.settle_flags(mirrors, settling);
-        Ok(())
+        self.settle_flags(mirrors, settling)
     }
 
 

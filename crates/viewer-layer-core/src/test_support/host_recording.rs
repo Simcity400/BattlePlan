@@ -1,5 +1,5 @@
 use crate::playhead_host::{units::Units, mirror::Mirror};
-use crate::layers::{Carried, Settling, Dirty, Inputs, Layer, Num, View};
+use crate::layers::{Carried, Settling, Dirty, Inputs, Layer, Num, Retirement, View};
 use crate::playhead_host::mirror::Mirrors;
 use playhead::{
     Settings, Step, Timeline,
@@ -114,6 +114,7 @@ pub struct Sum {
     pub entered: Option<mpsc::Sender<()>>,
     pub(crate) settle_gate: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
     pub(crate) settling: Option<mpsc::Sender<()>>,
+    pub stop_on_retirement: Option<mpsc::Sender<()>>,
     pub settle_armed: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) settle_stops: bool,
     pub(crate) times_out_at: Option<i32>,
@@ -127,7 +128,7 @@ impl Sum {
     }
 
     pub fn new(composes: &Arc<Mutex<u32>>) -> Self {
-        Self { column: None, second: false, refuse_high: false, hide_high: false, read: Vec::new(), viewed: Vec::new(), values: Vec::new(), dirty: Dirty::default(), composes: Arc::clone(composes), gate: None, entered: None, settle_gate: None, settling: None, settle_armed: None, settle_stops: false, times_out_at: None, frame: 0 }
+        Self { column: None, second: false, refuse_high: false, hide_high: false, read: Vec::new(), viewed: Vec::new(), values: Vec::new(), dirty: Dirty::default(), composes: Arc::clone(composes), gate: None, entered: None, settle_gate: None, settling: None, stop_on_retirement: None, settle_armed: None, settle_stops: false, times_out_at: None, frame: 0 }
     }
 
     pub fn gated(composes: &Arc<Mutex<u32>>) -> (Self, mpsc::Sender<()>) {
@@ -160,6 +161,11 @@ pub fn sum_of(mirror: &Mirror, column: Num<i32>) -> i64 {
 }
 
 impl Layer for Sum {
+    fn retirement(&self) -> Option<Retirement> {
+        let stop = self.stop_on_retirement.clone()?;
+        Some(Box::new(move || { let _ = stop.send(()); }))
+    }
+
     fn name(&self) -> &'static str {
         if self.second { "second" } else { "sum" }
     }

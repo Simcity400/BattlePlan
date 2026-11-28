@@ -1,5 +1,6 @@
 
 use super::meshes::{self, Chosen};
+use viewer_layer_core::layers::{RetirementFlag, Settling};
 use viewer_layer_core::playhead_host::{timeline::{self, Mark}, views::{self, Need}};
 use replay_data::{Hour, rows::TableId};
 use replay_frame::frame::{DecodedFrame, discovering};
@@ -399,7 +400,7 @@ impl Models {
         timeline::mark(self.maker, Mark::Asked);
     }
 
-    pub fn join(&mut self, hour: Option<Hour>, settling: viewer_layer_core::layers::Settling) -> bool {
+    pub fn join(&mut self, hour: Option<Hour>, settling: Settling, retiring: &RetirementFlag) -> bool {
         let Some(hour) = hour else { return self.take() };
         let until = Instant::now() + settling.waiting(WHOLE);
         let mut arrived = false;
@@ -408,10 +409,11 @@ impl Models {
             if self.stands().is_some_and(|stands| stands >= hour) || self.shared.lock().answered.as_ref().is_some_and(|&at| at >= hour) {
                 return arrived;
             }
-            if Instant::now() >= until {
+            let now = Instant::now();
+            if retiring.requested() || now >= until {
                 return arrived;
             }
-            self.shared.wait(until);
+            self.shared.wait(until.min(now + RetirementFlag::POLL));
         }
     }
 

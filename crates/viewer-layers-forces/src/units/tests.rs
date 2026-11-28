@@ -1,4 +1,4 @@
-use super::{Ground, Units, Withheld};
+use super::{Ground, RetirementFlag, Settling, Units, Withheld};
 use viewer_layer_core::{layers::{Layer, Upstream, View}, test_support::{rail_recording::recorded as recorded_pages, recorded::{self, column, frames_until, through}}, vision::{self as sight, Vision as Sight}, playhead_host::{MapSide, open, units}};
 use playhead::{Settings, Timeline};
 use replay_columnar::{manifest::Status, state::Cell, store::Store};
@@ -1001,7 +1001,7 @@ fn a_stack_asked_and_withdrawn_before_the_meshes_worker_takes_them_is_not_waited
     let stood = meshes.hour.expect("the meshes answered");
     let before = choices.asked.lock().unwrap().len();
     meshes.ask(ours, vec![super::meshes::Ask::Stack(103, asked), super::meshes::Ask::Gone(103)]);
-    meshes.join(stood, viewer_layer_core::layers::Settling::Whole);
+    meshes.join(stood, Settling::Whole, &RetirementFlag::default());
     assert!(meshes.stand(), "the withdrawn stack is not waited for: {}", meshes.state());
     assert_eq!(meshes.take_counts().waiting, 0, "no stack waits for its rows: {}", meshes.state());
     assert!(!meshes.meshes.contains_key(&103) && !meshes.withheld.contains_key(&103), "no mesh for the withdrawn stack");

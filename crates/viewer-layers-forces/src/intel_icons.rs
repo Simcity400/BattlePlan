@@ -2,7 +2,7 @@
 #[cfg(test)]
 mod tests;
 
-use viewer_layer_core::layers::{Carried, Settling, Inputs, Layer, Published, View};
+use viewer_layer_core::layers::{Carried, Settling, Inputs, Layer, Published, Retirement, RetirementFlag, View};
 use viewer_layer_core::playhead_host::{MapSide, mirror::Mirrors, views::{Need, Pace, Reader as ViewReader, Stands, Views, view::HeadFailure}};
 use playhead::Step;
 use replay_data::{
@@ -189,6 +189,7 @@ impl Installs {
 
 pub struct Icons {
     evaluate: Arc<dyn Evaluate>,
+    retiring: RetirementFlag,
     views: Option<Views>,
     pace: Pace,
     shown: bool,
@@ -205,7 +206,7 @@ pub struct Icons {
 
 impl Icons {
     pub fn new(evaluate: Arc<dyn Evaluate>, pace: Pace) -> Self {
-        Self { evaluate, views: None, pace, shown: false, choice: perspective::Choice::default(), tables: CORE.to_vec(), open: None, icons: None, stands: None, epoch: 0, applied: None, stats: Stats::default(), installs: Installs::default() }
+        Self { evaluate, retiring: RetirementFlag::default(), views: None, pace, shown: false, choice: perspective::Choice::default(), tables: CORE.to_vec(), open: None, icons: None, stands: None, epoch: 0, applied: None, stats: Stats::default(), installs: Installs::default() }
     }
 
     pub fn icons(&self) -> Option<(&Arc<IntelIcons>, Hour)> {
@@ -349,6 +350,9 @@ impl Icons {
         let until = Instant::now() + settling.waiting(CATCH_UP);
         let ran_out = |why: String| if settling.strict() { Err(io::Error::other(why)) } else { Ok(()) };
         loop {
+            if self.retiring.requested() {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
             if self.icons.as_ref().is_some_and(|installed| installed.shown.1 == hour) && !self.open.as_ref().is_some_and(|open| open.busy) {
                 return Ok(());
             }
@@ -358,8 +362,10 @@ impl Icons {
                 return ran_out(format!("The {NAME} layer did not reach hour {hour} in {CATCH_UP:?}"));
             }
             if open.busy {
-                let Ok(done) = open.done.recv_timeout(left) else {
-                    return ran_out(format!("The {NAME} layer's worker did not answer for hour {hour}"));
+                let done = match open.done.recv_timeout(left.min(RetirementFlag::POLL)) {
+                    Ok(done) => done,
+                    Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < until => continue,
+                    Err(_) => return ran_out(format!("The {NAME} layer's worker did not answer for hour {hour}")),
                 };
                 if self.take(done) {
                     return Ok(());
@@ -371,7 +377,7 @@ impl Icons {
             };
             if frame.hour < hour {
                 let seen = open.reader.published();
-                if open.reader.wait_newer(seen, left) == seen {
+                if open.reader.wait_newer(seen, left.min(RetirementFlag::POLL)) == seen && Instant::now() >= until {
                     return ran_out(format!("The {NAME} layer's rows stand at {}, not {hour}", frame.hour));
                 }
                 continue;
@@ -409,6 +415,10 @@ impl Icons {
 }
 
 impl Layer for Icons {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         NAME
     }

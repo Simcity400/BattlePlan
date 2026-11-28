@@ -1,4 +1,4 @@
-use super::{Models, Select, tables};
+use super::{Models, RetirementFlag, Select, tables};
 use viewer_layer_core::{layers::{Carried, Inputs, Layer, Settling, View}, playhead_host::{Entry, MapSide, open, mirror::Mirrors, views::{tests::{COMBATS, RECORDING, combat, hourly_steps, record_with, write_rows}, self}, units::Units}};
 use playhead::Step;
 use replay_columnar::manifest::Status;
@@ -91,7 +91,7 @@ impl Layer for Maker {
     fn join(&mut self, _mirrors: &Mirrors, _upstream: &viewer_layer_core::layers::Upstream<'_>, _settling: Settling) -> io::Result<()> {
         let (joins, head) = (*self.joins.lock().unwrap(), self.head);
         if let (Some(settling), Some(models)) = (joins, self.models()) {
-            models.join(head, settling);
+            models.join(head, settling, &RetirementFlag::default());
         }
         Ok(())
     }

@@ -3,7 +3,7 @@ use viewer_layer_core::counter_rows::{Row, Rows};
 pub mod meshes;
 pub mod models;
 
-use viewer_layer_core::{layers::{Carried, Change, Settling, Dirty, Gpu, Inputs, Layer, List, Num, Published, Upstream, View}, vision::Vision as VisionLayer};
+use viewer_layer_core::{layers::{Carried, Change, Settling, Dirty, Gpu, Inputs, Layer, List, Num, Published, Retirement, RetirementFlag, Upstream, View}, vision::Vision as VisionLayer};
 use viewer_layer_core::playhead_host::mirror::{Cell, Mirror, Mirrors};
 use playhead::Step;
 use replay_columnar::manifest::Status;
@@ -246,6 +246,7 @@ const TABLES: [TableId; 6] = [TableId::Divisions, TableId::DivisionMovement, Tab
 
 pub struct Units {
     ground: Arc<dyn Ground>,
+    retiring: RetirementFlag,
     window: Option<Window>,
     models: Option<models::Models>,
     meshes: Option<meshes::Meshes>,
@@ -312,6 +313,7 @@ impl Units {
     pub fn new(ground: Arc<dyn Ground>) -> Self {
         Self {
             ground,
+            retiring: RetirementFlag::default(),
             window: None,
             models: None,
             meshes: None,
@@ -1455,7 +1457,7 @@ impl Units {
     fn join_meshes(&mut self, mirrors: &Mirrors, settling: Settling) {
         let hour = mirrors.get(TableId::Divisions).and_then(Mirror::head);
         if let (Some(meshes), Some(hour), None) = (&mut self.meshes, hour, &self.refused) {
-            self.to_upload |= meshes.join(hour, settling);
+            self.to_upload |= meshes.join(hour, settling, &self.retiring);
             viewer_layer_core::playhead_host::timeline::mark(meshes.maker(), viewer_layer_core::playhead_host::timeline::Mark::Joined);
         }
         if viewer_runtime::view_record::on() {
@@ -1477,7 +1479,7 @@ impl Units {
         let ships = upstream.get::<crate::ships::Ships>();
         if let Some(models) = &mut self.models {
             let head = mirrors.get(TableId::Divisions).and_then(Mirror::head).or_else(|| ships.and_then(crate::ships::Ships::head));
-            let arrived = models.join(head, settling);
+            let arrived = models.join(head, settling, &self.retiring);
             let joined = models.join_ships(ships);
             self.models_new |= arrived | joined;
             self.to_upload |= arrived | joined;
@@ -1487,6 +1489,10 @@ impl Units {
 }
 
 impl Layer for Units {
+    fn retirement(&self) -> Option<Retirement> {
+        self.window.as_ref().map(|_| self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         "units"
     }
@@ -1653,7 +1659,11 @@ impl Layer for Units {
             self.join_meshes(mirrors, settling);
         }
         self.join_models(mirrors, upstream, settling);
-        Ok(())
+        if self.retiring.requested() {
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        } else {
+            Ok(())
+        }
     }
 
     fn settle_with(&mut self, mirrors: &Mirrors, upstream: &Upstream<'_>, settling: Settling) -> io::Result<()> {

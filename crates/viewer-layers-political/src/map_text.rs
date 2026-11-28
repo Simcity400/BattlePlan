@@ -4,7 +4,7 @@ mod tests;
 
 mod worker;
 
-use viewer_layer_core::{layers::{Carried, Settling, Gpu, Inputs, Layer, Published, Upstream, View}, vision::Vision};
+use viewer_layer_core::{layers::{Carried, Settling, Gpu, Inputs, Layer, Published, Retirement, RetirementFlag, Upstream, View}, vision::Vision};
 use viewer_layer_core::playhead_host::{Entry, mirror::{Mirror, Mirrors}, views::{Stepped, view}};
 use content_reader_localisation::localisation::Localisation;
 use playhead::{Step, changes::Changes};
@@ -106,6 +106,7 @@ const GAP: &str = "map text presented hour is unavailable: the hour is a gap in 
 
 pub struct MapText {
     source: Arc<dyn Source>,
+    retiring: RetirementFlag,
     branch: BranchId,
     kinds: Vec<Kind>,
     due: VecDeque<Due>,
@@ -127,6 +128,7 @@ impl MapText {
     pub fn new(source: Arc<dyn Source>, branch: BranchId) -> Self {
         Self {
             source,
+            retiring: RetirementFlag::default(),
             branch,
             kinds: Vec::new(),
             due: VecDeque::new(),
@@ -247,6 +249,9 @@ impl MapText {
         let entry = self.entry();
         if let Some(worker) = &mut self.worker {
             loop {
+                if self.retiring.requested() {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
                 for (serial, presented) in worker.take() {
                     self.marked[2] += 1;
                     if let Some(slot) = self.queue.iter_mut().find(|slot| matches!(slot, Slot::Pending { serial: held, .. } if *held == serial)) {
@@ -259,7 +264,7 @@ impl MapText {
                 }
                 let pending = self.queue.iter().any(|slot| matches!(slot, Slot::Pending { .. }));
                 let Some(limit) = wait.filter(|_| pending) else { break };
-                let look = || match &entry {
+                let look = || !self.retiring.requested() && match &entry {
                     Some(entry) => {
                         entry.playhead().stand();
                         Some(entry.playhead().epoch()) == newest
@@ -310,6 +315,10 @@ fn touched(changes: &Changes) -> bool {
 }
 
 impl Layer for MapText {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         "map_text"
     }
@@ -411,7 +420,7 @@ impl Layer for MapText {
             self.worker()?.through(hour, epoch);
         }
         match self.take(Some(settling.waiting(WAIT))) {
-            Err(error) if settling.strict() => Err(error),
+            Err(error) if settling.strict() || error.kind() == io::ErrorKind::Interrupted => Err(error),
             _ => Ok(()),
         }
     }

@@ -1225,6 +1225,10 @@ impl Names {
 }
 
 impl Layer for Names {
+    fn retirement(&self) -> Option<viewer_layer_core::layers::Retirement> {
+        self.modes.as_ref().and_then(Layer::retirement)
+    }
+
     fn name(&self) -> &'static str {
         "names"
     }
