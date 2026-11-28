@@ -33,6 +33,7 @@ pub type Seen = (Choice, Option<Arc<Vision>>);
 
 pub trait Build: Send + Sync + 'static {
     type Product: Send + Sync + 'static;
+    fn exact_columns(&self) -> &[TableId] { &[] }
     fn tables(&self) -> Option<Tables>;
     fn build(&self, frame: &DecodedFrame, seen: &Seen) -> io::Result<Self::Product>;
     fn anew(&self, frame: &DecodedFrame, seen: &Seen) -> io::Result<Self::Product> {
@@ -722,6 +723,9 @@ impl<B: Build> Whole<B> {
 
 impl<B: Build> crate::layers::Layer for Whole<B> {
     fn views(&mut self, store: &views::Store) -> io::Result<()> {
+        for &table in self.build.exact_columns() {
+            store.use_columns(table);
+        }
         self.rebuilt.set_views(store);
         Ok(())
     }
@@ -891,8 +895,9 @@ impl<B: Build> crate::layers::Layer for Whole<B> {
     }
 
     fn made_at(&self, hour: Hour) -> bool {
-        !self.open || self.held.as_ref().is_some_and(|built| {
-            built.of(hour) && (built.product.is_err() || built.generation == self.rebuilt.shared.lock().generation)
+        self.window.is_none() || !self.open || self.held.as_ref().is_some_and(|built| {
+            let state = self.rebuilt.shared.lock();
+            built.of(hour) && (built.generation == state.generation || state.stopped.is_some())
         })
     }
 

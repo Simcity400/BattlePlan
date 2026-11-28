@@ -786,7 +786,7 @@ struct Shared {
     unwritten: Vec<std::sync::OnceLock<SharedView>>,
     entry: Arc<Entry>,
     script_values: Arc<ScriptValues>,
-    variant_columns: Option<Arc<ExactColumns>>,
+    exact_columns: Mutex<BTreeMap<usize, Arc<ExactColumns>>>,
     script_values_view: Mutex<Option<((Hour, BranchId, u64), SharedView)>>,
     learned: Mutex<BTreeMap<(&'static str, usize), (Option<Hour>, u64)>>,
     asked: Mutex<Vec<Asked>>,
@@ -887,18 +887,8 @@ pub struct Store {
 
 impl Store {
     pub fn new(entry: &Arc<Entry>) -> Self {
-        Self::open(entry, false)
-    }
-
-    pub(super) fn for_map(entry: &Arc<Entry>) -> Self {
-        Self::open(entry, true)
-    }
-
-    fn open(entry: &Arc<Entry>, map: bool) -> Self {
         let written = entry.pages.written_tables(&crate::playhead_host::timeline_runs(entry), TABLE_COUNT);
         let script_values = Arc::new(ScriptValues::new(entry, written[SCRIPT_VALUES.index()].clone()));
-        let variants = TableId::VariantDefinitions;
-        let variant_columns = map.then(|| Arc::new(ExactColumns::new(entry, variants, written[variants.index()].clone())));
         let shared = Shared {
             kept: RwLock::new((0..TABLE_COUNT).map(|_| None).collect()),
             jobs: Mutex::default(),
@@ -914,7 +904,7 @@ impl Store {
             unwritten: (0..TABLE_COUNT).map(|_| std::sync::OnceLock::new()).collect(),
             entry: Arc::clone(entry),
             script_values,
-            variant_columns,
+            exact_columns: Mutex::default(),
             script_values_view: Mutex::default(),
             learned: Mutex::default(),
             asked: Mutex::default(),
@@ -933,6 +923,21 @@ impl Store {
         *lock(&self.shared.wake) = Some(wake);
     }
 
+    pub fn use_columns(&self, table: TableId) {
+        let at = table.index();
+        let mut kept = writing(&self.shared);
+        let mut columns = lock(&self.shared.exact_columns);
+        let std::collections::btree_map::Entry::Vacant(slot) = columns.entry(at) else { return };
+        let source = slot.insert(Arc::new(ExactColumns::new(&self.shared.entry, table, self.shared.written[at].clone())));
+        if let Some(held) = &mut kept[at] {
+            held.exact = Some(Arc::clone(source));
+            held.arriving();
+        }
+        drop(columns);
+        drop(kept);
+        self.shared.note_demand();
+    }
+
     pub fn demand(&self) -> u64 {
         self.shared.demand.load(Ordering::Acquire)
     }
@@ -946,6 +951,10 @@ impl Store {
     }
 
     pub fn declared(&self) -> Vec<playhead::Declared> {
+        self.declarations().into_iter().map(|(read, _)| read).collect()
+    }
+
+    pub(super) fn declarations(&self) -> Vec<(playhead::Declared, bool)> {
         let mut wanted: BTreeMap<usize, u64> = reading(&self.shared).iter().enumerate().filter_map(|(table, kept)| Some((table, kept.as_ref()?.columns))).collect();
         for asked in lock(&self.shared.asked).iter() {
             if let Asked::Open { needs, .. } | Asked::Declare { needs, .. } = asked {
@@ -954,13 +963,14 @@ impl Store {
                 }
             }
         }
+        let exact = lock(&self.shared.exact_columns);
         wanted
             .into_iter()
             .filter(|&(table, _)| table != SCRIPT_VALUES.index() && matches!(self.shared.written.get(table), Some(playhead::pages::TableWritten::Written)))
             .filter_map(|(table, mask)| {
                 let width = self.shared.kinds.get(table)?.len();
                 let columns = (0..width).filter(|&column| column >= 64 || mask & (1 << column) != 0).collect();
-                Some(playhead::Declared { table, columns, keyed: true, passing: false, hourly: false })
+                Some((playhead::Declared { table, columns, keyed: true, passing: false, hourly: false }, exact.contains_key(&table)))
             })
             .collect()
     }
@@ -2145,9 +2155,7 @@ fn declare(shared: &Arc<Shared>, id: u64, needs: &[Need], republishes: bool) {
             let Some(kinds) = shared.kinds.get(table) else { continue };
             let held = kept[table].get_or_insert_with(|| {
                 let mut held = Kept::new(kinds.clone());
-                if table == TableId::VariantDefinitions.index() {
-                    held.exact = shared.variant_columns.clone();
-                }
+                held.exact = lock(&shared.exact_columns).get(&table).cloned();
                 held
             });
             let columns = sets.iter().fold(0, |columns, &(set, _, _)| columns | set);

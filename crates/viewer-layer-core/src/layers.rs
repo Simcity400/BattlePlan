@@ -908,6 +908,7 @@ number! {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Read {
     pub columns: Vec<usize>,
+    pub watched: Vec<usize>,
     pub keyed: bool,
     pub hourly: bool,
 }
@@ -963,6 +964,15 @@ impl<'a> Inputs<'a> {
         Ok(Text { table, column })
     }
 
+    pub fn watch(&mut self, table: TableId, field: &str) -> io::Result<usize> {
+        let (column, _) = self.field(table, field)?;
+        let watched = &mut self.tables.entry(table.index()).or_default().watched;
+        if let Err(at) = watched.binary_search(&column) {
+            watched.insert(at, column);
+        }
+        Ok(column)
+    }
+
     pub fn list(&mut self, table: TableId, field: &str) -> io::Result<List> {
         let (column, kind) = self.column(table, field)?;
         if !matches!(kind, Kind::U32List | Kind::U64List | Kind::Opaque) {
@@ -981,13 +991,17 @@ impl<'a> Inputs<'a> {
     }
 
     fn column(&mut self, table: TableId, field: &str) -> io::Result<(usize, Kind)> {
+        let (column, kind) = self.field(table, field)?;
+        self.select(table, column);
+        Ok((column, kind))
+    }
+
+    fn field(&self, table: TableId, field: &str) -> io::Result<(usize, Kind)> {
         let kinds = self.kinds_of(table)?;
         let column = (0..kinds.len())
             .find(|&column| table.field_name(column) == Some(field))
             .ok_or_else(|| self.refuse(format!("it reads {table:?}.{field}, which this recording's schema does not hold")))?;
-        let kind = kinds[column];
-        self.select(table, column);
-        Ok((column, kind))
+        Ok((column, kinds[column]))
     }
 
     fn select(&mut self, table: TableId, column: usize) {

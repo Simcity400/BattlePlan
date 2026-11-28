@@ -644,9 +644,10 @@ fn variant_views_follow_the_recording_without_a_full_map_mirror() {
     let timeline = Timeline::whole(&*pages).unwrap();
     let hour = timeline.first();
     let entry = open(Units { name: "variant views".into(), pages, timeline, kinds }, quick()).unwrap();
-    let (layer, _) = super::shared_maps_tests::Reads::new(&[TableId::Countries]);
+    let (layer, _) = super::shared_maps_tests::Reads::with_column(&[TableId::Countries, variants], Some((variants, 1)));
     let mut side = MapSide::new(Arc::clone(&entry), vec![layer], View::default()).unwrap();
     side.set_branch(1);
+    side.views().use_columns(variants);
     let reader = side.views().handle().telling("variant models", &[super::views::Need::every(variants)]);
     let mut held = None;
     for (offset, token) in [(0, 9), (0, 9), (1, 9), (2, 10)] {

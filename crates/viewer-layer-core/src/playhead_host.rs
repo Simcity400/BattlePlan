@@ -825,7 +825,7 @@ impl MapSide<NoProducts> {
 
 impl<P: PlaybackProducts> MapSide<P> {
     pub fn lay_overlay_again(&mut self) -> Result<viewer_runtime::landed::Landed<P::OverlayMade>, String> {
-        let mut until = Instant::now() + HANDS_BACK;
+        let until = Instant::now() + HANDS_BACK;
         loop {
             let _ = self.whole_progress().try_recv();
             self.step_makers(false).map_err(|error| error.to_string())?;
@@ -835,13 +835,8 @@ impl<P: PlaybackProducts> MapSide<P> {
             let asked = self.ask_overlay_step(true, true, Arc::default());
             self.post_makers();
             let ready = |side: &Self| side.applied.is_some_and(|hour| side.whole_ready_at(hour));
-            if asked && ready(self) {
-                self.join_overlay(Settling::Whole);
-                if ready(self) {
-                    break;
-                }
-                until = Instant::now() + HANDS_BACK;
-                continue;
+            if asked && ready(self) && self.join_overlay(Settling::Whole) && ready(self) {
+                break;
             }
             if Instant::now() >= until || !self.wait_whole_progress(until) {
                 let loading = self.overlay.as_deref().map(Overlaying::loading).unwrap_or_default().join("; ");
@@ -874,7 +869,7 @@ impl<P: PlaybackProducts> MapSide<P> {
     pub fn with_products(entry: Arc<Entry>, mut layers: Vec<Box<dyn Layer>>, view: View) -> io::Result<Self> {
         let names: Vec<_> = layers.iter().map(|layer| layer.name()).collect();
         let counter_at = counters_at(&names);
-        let views = views::Store::for_map(&entry);
+        let views = views::Store::new(&entry);
         for layer in &mut layers {
             layer.views(&views)?;
         }
@@ -883,8 +878,9 @@ impl<P: PlaybackProducts> MapSide<P> {
         let declared_layers = declared;
         let demand = views.demand();
         views.accept_asks();
-        let declared = merged(&declared_layers, views.declared());
-        let reader = entry.playhead.declare(to_declared(&declared), Some(mirror::rebuild_map(Arc::clone(&entry.pages))))?;
+        let declared = merged(&declared_layers, views.declarations());
+        let (tables, projections) = to_declared(&declared);
+        let reader = entry.playhead.declare_projected(tables, Some(mirror::rebuild(Arc::clone(&entry.pages))), projections)?;
         let consumer = entry.playhead.consumer(reader);
         let worker = Worker::new(views.handle())?;
         let vision = shown_vision::ShownVision::with_views(views.handle());
@@ -1181,12 +1177,13 @@ impl<P: PlaybackProducts> MapSide<P> {
     fn remirror(&mut self) -> io::Result<()> {
         let demand = self.views.demand();
         self.views.accept_asks();
-        let declared = merged(&self.declared_layers, self.views.declared());
+        let declared = merged(&self.declared_layers, self.views.declarations());
         if declared == self.declared {
             self.demand = demand;
             return Ok(());
         }
-        self.entry.playhead.redeclare(self.reader, to_declared(&declared))?;
+        let (tables, projections) = to_declared(&declared);
+        self.entry.playhead.redeclare_projected(self.reader, tables, projections, false)?;
         self.views.settled();
         if let Some(mirrors) = self.mirrors.as_mut().and_then(Arc::get_mut) {
             for table in self.declared.keys().filter(|table| !declared.contains_key(table)) {
@@ -1765,6 +1762,13 @@ impl<P: PlaybackProducts> MapSide<P> {
         ready
     }
 
+    fn frame_whole_step(&mut self, head: Hour, lay: bool) -> io::Result<Frame> {
+        let was = self.consumer.set_blocking(true);
+        let result = self.frame_within(head, Settling::step(), lay);
+        self.consumer.set_blocking(was);
+        result
+    }
+
     fn wait_whole_progress(&mut self, until: Instant) -> bool {
         #[cfg(test)]
         if let Some(before_wait) = self.before_whole_wait.take() {
@@ -1781,7 +1785,7 @@ impl<P: PlaybackProducts> MapSide<P> {
             let _ = self.whole_progress().try_recv();
             let newest = self.entry.playhead.newest().unwrap_or(head);
             let target = head.min(newest.max(self.applied.unwrap_or(newest)));
-            let frame = self.frame_within(target, Settling::step(), false)?;
+            let frame = self.frame_whole_step(target, false)?;
             if !self.composing && !self.superseded && self.applied == Some(head) && self.makers_home() && self.ready.iter().zip(&self.reads).all(|(&ready, reads)| ready || reads.is_err()) {
                 if self.settle_makers()? && self.overlay_whole(head)? {
                     self.combat_whole = self.combat_whole();
@@ -1864,6 +1868,7 @@ impl<P: PlaybackProducts> MapSide<P> {
             if !self.makers_home() {
                 return None;
             }
+            self.views.made();
             let joined = self.combat.join(Settling::Whole, std::time::Duration::ZERO);
             if joined.made {
                 return Some(Ok(()));
@@ -1897,7 +1902,7 @@ impl<P: PlaybackProducts> MapSide<P> {
 
     fn step_makers(&mut self, lay: bool) -> io::Result<()> {
         self.applied.filter(|_| !self.makers_home())
-            .map_or(Ok(()), |hour| self.frame_within(hour, Settling::step(), lay).map(|_| ()))
+            .map_or(Ok(()), |hour| self.frame_whole_step(hour, lay).map(|_| ()))
     }
 
     fn post_makers(&mut self) {
@@ -2415,6 +2420,9 @@ fn declare(entry: &Entry, layers: &mut [Box<dyn Layer>], view: &View) -> Declari
                     held.columns.extend(read.columns);
                     held.columns.sort_unstable();
                     held.columns.dedup();
+                    held.watched.extend(read.watched);
+                    held.watched.sort_unstable();
+                    held.watched.dedup();
                     held.keyed |= read.keyed;
                     held.hourly |= read.hourly;
                 }
@@ -2479,19 +2487,33 @@ fn reads_held(mirrors: &Mirrors, reads: &BTreeMap<usize, Read>) -> bool {
     reads.iter().all(|(&table, read)| mirrors.get(TableId::ALL[table]).is_some_and(|mirror| mirror.covers(read)))
 }
 
-fn merged(layers: &BTreeMap<usize, Read>, makers: Vec<Declared>) -> BTreeMap<usize, Read> {
+fn merged(layers: &BTreeMap<usize, Read>, makers: Vec<(Declared, bool)>) -> BTreeMap<usize, Read> {
     let mut union = layers.clone();
-    for read in makers {
+    for (read, exact) in makers {
         let held = union.entry(read.table).or_default();
-        held.columns.extend(read.columns);
-        held.columns.sort_unstable();
-        held.columns.dedup();
+        let columns = if exact { &mut held.watched } else { &mut held.columns };
+        columns.extend(read.columns);
+        columns.sort_unstable();
+        columns.dedup();
         held.keyed |= read.keyed;
         held.hourly |= read.hourly;
     }
     union
 }
 
-fn to_declared(declared: &BTreeMap<usize, Read>) -> Vec<Declared> {
-    declared.iter().map(|(&table, read)| Declared { table, columns: read.columns.clone(), keyed: read.keyed, passing: false, hourly: read.hourly }).collect()
+fn to_declared(declared: &BTreeMap<usize, Read>) -> (Vec<Declared>, BTreeMap<usize, Vec<usize>>) {
+    let mut projections = BTreeMap::new();
+    let tables = declared.iter().map(|(&table, read)| {
+        let mut columns = read.columns.clone();
+        if !read.watched.is_empty() {
+            columns.extend_from_slice(&read.watched);
+            columns.sort_unstable();
+            columns.dedup();
+            if columns != read.columns {
+                projections.insert(table, read.columns.clone());
+            }
+        }
+        Declared { table, columns, keyed: read.keyed, passing: false, hourly: read.hourly }
+    }).collect();
+    (tables, projections)
 }

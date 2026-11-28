@@ -103,6 +103,7 @@ const OVERLAY: &[TableId] = &[
     TableId::Capitulation,
     TableId::CountryGameScoreInputs,
     TableId::AirRegionalMissions,
+    TableId::VariantDefinitions,
     TableId::RaidAirSites,
     TableId::RaidAirScores,
     TableId::RaidCountryInputs,
@@ -816,6 +817,7 @@ impl Overlay {
             return;
         }
         let tables = self.content.tables;
+        store.use_columns(TableId::VariantDefinitions);
         let rows = Arc::new(store.reader("overlay", &overlay_needs()));
         let maker = Maker {
             content: Arc::clone(&self.content),

@@ -56,7 +56,7 @@ struct Columns {
     task_force: Num<u64>,
     class_id: Num<i32>,
     model: [usize; 6],
-    explicit_entity: Text,
+    explicit_entity: usize,
     tag: Text,
     link_slot: Num<u32>,
     speed: Num<i32>,
@@ -706,6 +706,7 @@ impl Ships {
     }
 
     pub fn set_views(&self, store: &views::Store) {
+        store.use_columns(TableId::VariantDefinitions);
         let needs: Vec<Need> = ROSTER_TABLES.iter().map(|&table| Need::every(table)).collect();
         let reader = store.reader("ship_rosters", &needs);
         let mut asked = self.rosters.shared.lock();
@@ -1237,7 +1238,7 @@ impl Layer for Ships {
         if self.window {
             inputs.after("vision");
         }
-        for table in [TableId::TaskForces, TableId::TaskForceMapMotion, TableId::TaskForceCounterInputs, TableId::TaskForceMissions, TableId::ProvinceUnitOrder, TableId::Ships, TableId::ShipModels, TableId::VariantDefinitions, TableId::Countries, TableId::CountryLinks, TableId::Clock] {
+        for table in [TableId::TaskForces, TableId::TaskForceMapMotion, TableId::TaskForceCounterInputs, TableId::TaskForceMissions, TableId::ProvinceUnitOrder, TableId::Ships, TableId::ShipModels, TableId::Countries, TableId::CountryLinks, TableId::Clock] {
             inputs.table(table, true)?;
         }
         let model = ["variant", "hull_sprite", "fallback_sprite", "model_number", "formation_flags", "counter"];
@@ -1267,7 +1268,7 @@ impl Layer for Ships {
             task_force: inputs.number(TableId::Ships, "task_force")?,
             class_id: inputs.number(TableId::Ships, "class_id")?,
             model: columns,
-            explicit_entity: inputs.text(TableId::VariantDefinitions, "explicit_entity")?,
+            explicit_entity: inputs.watch(TableId::VariantDefinitions, "explicit_entity")?,
             tag: inputs.text(TableId::Countries, "tag")?,
             link_slot: inputs.number(TableId::CountryLinks, "canonical_slot")?,
             speed: inputs.number(TableId::Clock, "speed")?,
@@ -1384,7 +1385,7 @@ impl Layer for Ships {
                         }
                     }
                 }
-                TableId::VariantDefinitions if any(&[columns.explicit_entity.column]) => self.rosters_dirty = true,
+                TableId::VariantDefinitions if any(&[columns.explicit_entity]) => self.rosters_dirty = true,
                 TableId::Countries if any(&[columns.tag.column]) => self.rosters_dirty = true,
                 TableId::CountryLinks if any(&[columns.link_slot.column]) => self.rosters_dirty = true,
                 TableId::Clock if any(&[columns.speed.column]) => self.all_dirty = true,

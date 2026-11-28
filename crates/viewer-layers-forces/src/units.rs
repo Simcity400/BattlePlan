@@ -1499,6 +1499,7 @@ impl Layer for Units {
 
     fn views(&mut self, store: &viewer_layer_core::playhead_host::views::Store) -> io::Result<()> {
         if let Some(window) = &mut self.window {
+            store.use_columns(TableId::VariantDefinitions);
             window.views = Some(store.handle());
         }
         Ok(())
