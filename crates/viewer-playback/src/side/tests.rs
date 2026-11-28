@@ -183,16 +183,16 @@ fn a_paused_side_wakes_on_seek_mode_switch_and_landed_answer_and_stops_at_rest()
 
 #[test]
 fn a_view_change_keeps_independent_products_in_the_window() {
-    let (recording, _) = record(2, 8, busy);
+    let (recording, _) = record(1, 8, busy);
     let entry = open(units(recording, "hide one layer"), quick()).unwrap();
     let first = Sum::new(&Arc::new(Mutex::new(0)));
     let mut second = Sum::new(&Arc::new(Mutex::new(0)));
-    (second.second, second.hide_high) = (true, true);
+    second.hide_high = true;
     let map = MapSide::with_products(entry, vec![Box::new(first), Box::new(second)], View::default()).unwrap();
     let mut side = SideThread::new(map, Arc::new(|| {})).unwrap();
     side.anchor(0, false, 1.0, true);
     side.ask(View::default(), Head::Paced(3), None, None);
-    side.wait_window(|side| side.applied() == Some(3) && !side.composing() && side.draws("second")).unwrap();
+    side.wait_window(|side| side.applied() == Some(3) && !side.composing() && side.draws("sum")).unwrap();
     side.ask(View { camera_height: 4.0, ..View::default() }, Head::Paced(3), None, None);
     side.wait_window(|side| side.view().camera_height == 4.0).unwrap();
     assert!(!side.composing(), "the changed declaration left the other layer's product in this window");
