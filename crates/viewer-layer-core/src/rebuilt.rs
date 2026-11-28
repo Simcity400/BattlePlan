@@ -33,6 +33,7 @@ pub type Seen = (Choice, Option<Arc<Vision>>);
 
 pub trait Build: Send + Sync + 'static {
     type Product: Send + Sync + 'static;
+    fn exact_columns(&self) -> &[TableId] { &[] }
     fn tables(&self) -> Option<Tables>;
     fn build(&self, frame: &DecodedFrame, seen: &Seen) -> io::Result<Self::Product>;
     fn anew(&self, frame: &DecodedFrame, seen: &Seen) -> io::Result<Self::Product> {
@@ -149,7 +150,7 @@ struct State<P> {
     stop: bool,
     head: Option<Hour>,
     views: Option<views::Views>,
-    reader: Option<views::Reader>,
+    reader: Option<Arc<views::Reader>>,
     built: PublishedSlot<Option<Arc<Built<P>>>>,
     tables: Vec<TableId>,
     builds: Builds,
@@ -170,6 +171,13 @@ struct Shared<P> {
 impl<P> Shared<P> {
     fn lock(&self) -> MutexGuard<'_, State<P>> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn notify_product(&self, state: &State<P>) {
+        self.built.notify_all();
+        if let Some(views) = &state.views {
+            views.notify_progress();
+        }
     }
 }
 
@@ -219,8 +227,9 @@ impl<P: Send + Sync + 'static> Rebuilt<P> {
             viewer_runtime::worker_priority::enter(viewer_runtime::worker_priority::Class::Kept);
             let worked = std::panic::catch_unwind(AssertUnwindSafe(|| work(&working, &*build, &Rules { name, timed, maker })));
             if let Err(panic) = worked {
-                working.lock().stopped.set_some(format!("The {name} worker stopped: {}", panicked(&*panic)));
-                working.built.notify_all();
+                let mut state = working.lock();
+                state.stopped.set_some(format!("The {name} worker stopped: {}", panicked(&*panic)));
+                working.notify_product(&state);
             }
         })?;
         Ok(Self { shared, worker: Some(worker), name, maker, timed })
@@ -247,7 +256,7 @@ impl<P: Send + Sync + 'static> Rebuilt<P> {
         let mut state = self.shared.lock();
         let needs: Vec<Need> = state.tables.iter().copied().map(Need::every).collect();
         if state.refused.is_none() {
-            state.reader = Some(store.reader(self.name, &needs));
+            state.reader = Some(Arc::new(store.reader(self.name, &needs)));
             state.awaiting = state.tables.clone();
         }
         state.views = Some(store.handle());
@@ -316,6 +325,10 @@ impl<P: Send + Sync + 'static> Rebuilt<P> {
     }
 
     pub fn wait(&self, hour: Hour, limit: Duration) -> io::Result<Landed<Arc<Built<P>>>> {
+        self.wait_for(hour, limit, false)
+    }
+
+    fn wait_for(&self, hour: Hour, limit: Duration, drives_rows: bool) -> io::Result<Landed<Arc<Built<P>>>> {
         let until = Instant::now() + limit;
         let mut state = self.shared.lock();
         loop {
@@ -331,6 +344,9 @@ impl<P: Send + Sync + 'static> Rebuilt<P> {
             if let Some(why) = state.refused.landed_clone() {
                 let generation = state.generation;
                 return Ok(why.map(|why| Arc::new(Built::new(hour, generation, Err(why), 0, None, None))));
+            }
+            if drives_rows && state.views.is_some() && state.reader.as_ref().is_none_or(|reader| !reader.has_rows_at(hour)) {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, format!("The {} layer awaits {:?} at hour {hour}", self.name, state.tables)));
             }
             let now = Instant::now();
             if now >= until {
@@ -490,32 +506,21 @@ fn refuse<P>(shared: &Shared<P>, state: &mut State<P>, why: String) {
         return;
     }
     state.built.set_some(Arc::new(Built::new(hour, state.generation, Err(why), 0, None, None)));
-    shared.built.notify_all();
+    shared.notify_product(state);
 }
 
-enum Found<'a, P> {
-    Frame(MutexGuard<'a, State<P>>, Arc<DecodedFrame>, u64),
-    Wait(MutexGuard<'a, State<P>>),
-}
-
-fn from_rows<'a, P>(mut state: MutexGuard<'a, State<P>>, held: &mut Option<views::Reader>) -> Found<'a, P> {
-    if held.is_none() {
-        *held = state.reader.take();
-    }
-    if held.is_none() {
-        let Some(store) = state.views.clone() else { return Found::Wait(state) };
+fn row_reader<P>(state: &mut State<P>, built: &Condvar) -> Option<Arc<views::Reader>> {
+    if state.reader.is_none() {
+        let store = state.views.as_ref()?;
         let needs: Vec<Need> = state.tables.iter().copied().map(Need::every).collect();
-        *held = Some(store.reader(state.name, &needs));
+        state.reader = Some(Arc::new(store.reader(state.name, &needs)));
         state.awaiting = state.tables.clone();
+        built.notify_all();
     }
-    match held.as_ref().and_then(views::Reader::newest).filter(|(frame, _)| holds(frame, &state.tables)) {
-        Some((frame, published)) => Found::Frame(state, frame, published),
-        None => Found::Wait(state),
-    }
+    state.reader.clone()
 }
 
 fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
-    let mut reader: Option<views::Reader> = None;
     let mut last: Option<(Arc<DecodedFrame>, u64, u64)> = None;
     loop {
         let mut state = shared.lock();
@@ -529,13 +534,12 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
             continue;
         }
         if !state.open || state.seen.is_none() {
-            (reader, last) = (None, None);
+            last = None;
             state.awaiting.clear();
             let _ = shared.wake.wait_timeout(state, TICK);
             continue;
         }
         if let Some(why) = state.refused.as_ref().cloned() {
-            reader = None;
             state.reader = None;
             state.awaiting.clear();
             refuse(shared, &mut state, why);
@@ -543,20 +547,24 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
             continue;
         }
         let generation = state.generation;
-        let (mut state, frame, published) = match from_rows(state, &mut reader) {
-            Found::Frame(state, frame, published) => (state, frame, published),
-            Found::Wait(state) => {
-                let _ = shared.wake.wait_timeout(state, TICK);
-                continue;
-            }
+        let Some(reader) = row_reader(&mut state, &shared.built) else {
+            let _ = shared.wake.wait_timeout(state, TICK);
+            continue;
+        };
+        let before = reader.published();
+        let Some((frame, published)) = reader.newest().filter(|(frame, _)| holds(frame, &state.tables)) else {
+            drop(state);
+            reader.wait_newer(before, TICK);
+            continue;
         };
         state.awaiting.clear();
         if last.as_ref().is_some_and(|(held, _, taken)| Arc::ptr_eq(held, &frame) && *taken == generation) || state.generation != generation {
             if let Some(built) = state.built.as_ref().filter(|built| built.generation == generation && built.current() >= frame.hour)
-                && let Some(through) = reader.as_ref().and_then(|reader| reader.through(Arc::as_ptr(&frame)))
+                && let Some(through) = reader.through(Arc::as_ptr(&frame))
                 && through > built.stands()
             {
                 built.stands.advance(through);
+                shared.notify_product(&state);
             }
             if state.generation != generation {
                 continue;
@@ -564,9 +572,7 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
             state.settled = Some((frame.hour, generation));
             shared.built.notify_all();
             drop(state);
-            if let Some(reader) = &reader {
-                reader.wait_newer(published, TICK);
-            }
+            reader.wait_newer(published, TICK);
             continue;
         }
         if let Some((_, before, _)) = &last {
@@ -587,8 +593,7 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
             if stood {
                 held.current.set(frame.hour);
                 state.builds.confirmed += 1;
-                drop(state);
-                shared.built.notify_all();
+                shared.notify_product(&state);
                 continue;
             }
         }
@@ -603,8 +608,7 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
             let absent = state.source.as_ref().map_or_else(Vec::new, |(entry, _)| absent(entry, &missed));
             if !absent.is_empty() {
                 state.refused.set_if_changed(Some(refusal(&format!("the {} layer", rules.name), &absent)));
-                drop(state);
-                shared.built.notify_all();
+                shared.notify_product(&state);
                 continue;
             }
             state.tables.extend(missed.iter().copied());
@@ -612,9 +616,8 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
             state.tables.dedup();
             state.awaiting = missed;
             state.builds.discovered += 1;
-            if let Some(reader) = &reader {
-                reader.declare_only(&state.tables);
-            }
+            state.generation += 1;
+            reader.declare_only(&state.tables);
             drop(state);
             shared.built.notify_all();
             continue;
@@ -627,9 +630,8 @@ fn work<B: Build>(shared: &Shared<B::Product>, build: &B, rules: &Rules) {
         }
         if state.open {
             state.built.set_some(Arc::new(Built::new(frame.hour, generation, product, ns, Some(frame), Some(seen))));
+            shared.notify_product(&state);
         }
-        drop(state);
-        shared.built.notify_all();
     }
 }
 
@@ -721,6 +723,9 @@ impl<B: Build> Whole<B> {
 
 impl<B: Build> crate::layers::Layer for Whole<B> {
     fn views(&mut self, store: &views::Store) -> io::Result<()> {
+        for &table in self.build.exact_columns() {
+            store.use_columns(table);
+        }
         self.rebuilt.set_views(store);
         Ok(())
     }
@@ -810,10 +815,10 @@ impl<B: Build> crate::layers::Layer for Whole<B> {
                 () if self.exact && self.held.is_some() => WHOLE,
                 () => settling.waiting(WHOLE),
             };
-            if self.exact && !waiting.is_zero() && self.rebuilt.wait(hour, waiting).is_err() && self.rebuilt.stopped().is_none() {
+            if !waiting.is_zero() && let Err(error) = self.rebuilt.wait_for(hour, waiting, true)
+                && self.exact && error.kind() != io::ErrorKind::WouldBlock && self.rebuilt.stopped().is_none()
+            {
                 self.behind = true;
-            } else if !self.exact {
-                let _ = self.rebuilt.wait(hour, waiting);
             }
         }
         if let Some(why) = self.rebuilt.stopped() {
@@ -889,12 +894,24 @@ impl<B: Build> crate::layers::Layer for Whole<B> {
         }
     }
 
+    fn made_at(&self, hour: Hour) -> bool {
+        self.window.is_none() || !self.open || self.held.as_ref().is_some_and(|built| {
+            let state = self.rebuilt.shared.lock();
+            built.of(hour) && (built.generation == state.generation || state.stopped.is_some())
+        })
+    }
+
     fn held(&self) -> usize {
         self.held.as_ref().and_then(|built| built.product.as_ref().ok()).map_or(0, self.bytes)
     }
 
     fn any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    #[cfg(test)]
+    fn any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
