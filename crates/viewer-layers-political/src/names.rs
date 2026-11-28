@@ -1427,6 +1427,10 @@ impl Layer for Names {
         }
     }
 
+    fn made_at(&self, hour: Hour) -> bool {
+        self.kind != Kind::Whole || self.modes.as_ref().is_none_or(|modes| modes.made_at(hour))
+    }
+
     fn held(&self) -> usize {
         self.areas.values().map(area_bytes).sum::<usize>()
             + self.worker_held

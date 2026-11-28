@@ -464,7 +464,7 @@ fn a_mirror_of_an_earlier_format_reads_the_columns_added_since_not_recorded() {
 #[test]
 fn a_map_on_an_earlier_format_plays_with_changed_tables_withheld_and_newer_tables_not_recorded() {
     use super::{
-        details, for_the_makers,
+        details,
         shared_maps_tests::Reads,
         views::{Need, Pace, Stepped},
     };
@@ -500,11 +500,6 @@ fn a_map_on_an_earlier_format_plays_with_changed_tables_withheld_and_newer_table
     let entry = open(units, quick()).unwrap();
     entry.set_capture(CaptureMode::Full);
 
-    let declared = for_the_makers(&entry);
-    for table in [TableId::VariantStats, TableId::VariantChanges, TableId::RaidSpeedInputs, TableId::RocketProductionOutput, TableId::ScriptVariableValues] {
-        assert!(!declared.contains_key(&table.index()), "withheld or newer table {table:?} must not be declared");
-    }
-
     let mut inputs = Inputs::new(entry.kinds(), "test");
     let refused = inputs.table(TableId::VariantStats, true).unwrap_err().to_string();
     assert!(refused.contains("test") && refused.contains("VariantStats"), "{refused}");
@@ -521,6 +516,8 @@ fn a_map_on_an_earlier_format_plays_with_changed_tables_withheld_and_newer_table
     side.anchor(5, false, 0.0, true);
     entry.playhead().wait_declarations().unwrap();
     side.catch_up(5).unwrap();
+    let declared = side.readers();
+    assert_eq!(declared.iter().map(|(table, ..)| *table).collect::<Vec<_>>(), [TableId::Countries]);
     let (frame, failures) = reader.frame_with_failures().unwrap();
     assert_eq!(frame.hour, 5);
     let assert_frame = |frame: &replay_frame::frame::DecodedFrame| {

@@ -487,6 +487,10 @@ impl Layer for Icons {
         self.icons.as_ref().map_or(Published::Current, |installed| Published::Cadence(self.stands.as_ref().map_or(installed.shown.1, |stands| stands.hour().max(installed.shown.1))))
     }
 
+    fn made_at(&self, hour: Hour) -> bool {
+        self.open.is_none() || matches!(self.published(), Published::Cadence(held) if held == hour)
+    }
+
     fn held(&self) -> usize {
         self.icons.as_ref().map_or(0, |installed| Self::icon_bytes(&installed.shown.0)) + self.tables.capacity() * std::mem::size_of::<TableId>()
     }

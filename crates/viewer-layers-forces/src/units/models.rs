@@ -140,10 +140,11 @@ struct Made {
     generation: u64,
     stamp: u64,
     hour: Hour,
-    perspective: Choice,
+    key: Key,
     stands: Hour,
     frame: Option<Arc<DecodedFrame>>,
     prepared: Arc<PreparedModels>,
+    refusal: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -172,7 +173,6 @@ struct Held {
     made: viewer_runtime::landed::PublishedKeyed<(u64, u64, Hour), Made>,
     published: u64,
     answered: viewer_runtime::landed::Published<Option<Hour>>,
-    refused: viewer_runtime::landed::Published<Option<String>>,
     working: bool,
     tables: Vec<TableId>,
     counts: Counts,
@@ -189,9 +189,13 @@ impl Shared {
         self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn wait(&self, until: Instant) {
+    fn wait(&self, until: Instant, reader: &views::Reader) -> bool {
         let held = self.lock();
+        if reader.frame().is_none() {
+            return false;
+        }
         let _ = self.done.wait_timeout(held, until.saturating_duration_since(Instant::now()));
+        true
     }
 
     fn answered(&self, stands: Hour) {
@@ -288,6 +292,7 @@ fn work(shared: &Shared, select: &dyn Select, reader: &views::Reader, maker: tim
             reader.declare_only(&tables);
             let mut held = shared.lock();
             (held.tables, held.working) = (tables.clone(), true);
+            shared.done.notify_all();
             drop(held);
             (built, standing, handled) = (None, None, None);
             continue;
@@ -300,26 +305,26 @@ fn work(shared: &Shared, select: &dyn Select, reader: &views::Reader, maker: tim
             (built, standing, handled) = (None, None, None);
             continue;
         }
-        match prepared {
-            Ok(prepared) => {
-                let stamp = held.published + 1;
-                held.published = stamp;
-                held.refused.set_if_changed(None);
-                build_seq += 1;
-                held.made.publish(
-                    (generation, build_seq, stands),
-                    Made { generation, stamp, hour: frame.hour, perspective, stands, frame: Some(frame), prepared: Arc::new(prepared) },
-                );
-                standing = Some(at);
-            }
+        let (prepared, refusal) = match prepared {
+            Ok(prepared) => (prepared, None),
             Err(error) => {
-                held.refused.set_if_changed(Some(format!("Today's unit models cannot be made from the rows at the head: {error}")));
+                let why = format!("Today's unit models cannot be made from the rows at the head: {error}");
+                (PreparedModels::withheld(&why), Some(why))
             }
-        }
+        };
+        let stamp = held.published + 1;
+        held.published = stamp;
+        build_seq += 1;
+        held.made.publish(
+            (generation, build_seq, stands),
+            Made { generation, stamp, hour: frame.hour, key: at.1.clone(), stands, frame: Some(frame), prepared: Arc::new(prepared), refusal },
+        );
+        standing = Some(at);
         held.answered.advance(stands);
         held.working = false;
         drop(held);
         shared.done.notify_all();
+        reader.notify_progress();
     }
 }
 
@@ -335,7 +340,7 @@ pub struct Models {
     joined: Option<u64>,
     pub prepared: Option<(Hour, viewer_runtime::landed::Landed<Arc<PreparedModels>>)>,
     pub refused: Option<String>,
-    asked: Option<Choice>,
+    asked: Option<Key>,
     prepared_for: Option<Choice>,
 }
 
@@ -394,12 +399,15 @@ impl Models {
             (Some((seq, lines)), _) => Some((seq, Arc::new(lines.to_vec()))),
         };
         let asked = Asked { perspective: perspective.clone(), convoys: self.lines.clone(), naval };
+        self.asked = Some(asked.key());
         self.shared.lock().asked = Some(asked);
-        self.asked = Some(perspective.clone());
         timeline::mark(self.maker, Mark::Asked);
     }
 
     pub fn join(&mut self, hour: Option<Hour>, settling: viewer_layer_core::layers::Settling) -> bool {
+        if self.worker.is_none() {
+            return false;
+        }
         let Some(hour) = hour else { return self.take() };
         let until = Instant::now() + settling.waiting(WHOLE);
         let mut arrived = false;
@@ -411,19 +419,20 @@ impl Models {
             if Instant::now() >= until {
                 return arrived;
             }
-            self.shared.wait(until);
+            if !self.shared.wait(until, &self.reader) { return arrived }
         }
     }
 
     fn take(&mut self) -> bool {
+        let perspective = self.asked.as_ref().map(|key| &key.0);
         let mut arrived = false;
         {
             let held = self.shared.lock();
-            self.refused = held.refused.as_ref().cloned();
-            if let Some(made) = held.made.as_ref().filter(|made| made.generation == self.generation && self.asked.as_ref() == Some(&made.perspective))
+            if let Some(made) = held.made.as_ref().filter(|made| made.generation == self.generation && perspective == Some(&made.key.0))
                 && self.made.as_ref().is_none_or(|ours| ours.stamp < made.stamp)
             {
                 arrived = self.made.as_ref().is_none_or(|ours| !Arc::ptr_eq(&ours.prepared, &made.prepared));
+                self.refused.clone_from(&made.refusal);
                 self.made = held.made.landed_clone();
             }
         }
@@ -444,10 +453,10 @@ impl Models {
         }
         if arrived && let Some(made) = &self.made {
             let prepared = made.as_ref().map(|made| Arc::clone(&made.prepared));
-            (self.shipless, self.joined) = ((!prepared.naval()).then(|| Arc::clone(&*prepared)), None);
-            (self.prepared, self.prepared_for) = (Some((made.hour, prepared)), Some(made.perspective.clone()));
+            (self.shipless, self.joined) = ((self.refused.is_none() && !prepared.naval()).then(|| Arc::clone(&*prepared)), None);
+            (self.prepared, self.prepared_for) = (Some((made.hour, prepared)), Some(made.key.0.clone()));
         }
-        if let Some((hour, prepared)) = self.prepared.clone().filter(|_| self.prepared_for.is_some() && self.prepared_for != self.asked) {
+        if let Some((hour, prepared)) = self.prepared.clone().filter(|_| self.prepared_for.is_some() && self.prepared_for.as_ref() != perspective) {
             let withheld = PreparedModels::withheld("the models of the viewing country chosen are being made");
             (self.prepared, self.prepared_for, self.shipless, self.joined) = (Some((hour, prepared.map(|_| Arc::new(withheld)))), None, None, None);
             arrived = true;
@@ -461,6 +470,13 @@ impl Models {
 
     pub fn stands(&self) -> Option<Hour> {
         self.made.as_ref().filter(|made| made.generation == self.generation).map(|made| made.stands)
+    }
+
+    pub(super) fn made_at(&self, hour: Hour) -> bool {
+        (self.worker.is_none() && self.refused.is_some()) || self.made.as_ref().is_some_and(|made| {
+            made.generation == self.generation && self.asked.as_ref() == Some(&made.key)
+                && (made.stands == hour || (made.refusal.is_none() && made.stands > hour))
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]

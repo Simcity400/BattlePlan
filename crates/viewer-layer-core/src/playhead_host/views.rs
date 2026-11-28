@@ -589,7 +589,7 @@ impl Kept {
     }
 
     fn home(&self, columns: u64, mirror: Option<&Mirror>) -> bool {
-        self.set(columns).is_some() && mirror.is_some_and(|mirror| self.exact.is_some() || holds_every(mirror, self.columns, self.kinds.len()))
+        self.set(columns).is_some() && mirror.is_some_and(|mirror| mirror.keyed() && (self.exact.is_some() || holds_every(mirror, columns, self.kinds.len())))
     }
 
     fn view(&self, table: usize, columns: u64, mirror: Option<&Mirror>, order: &mut Vec<(u128, u32)>, made: &mut Made) -> SharedView {
@@ -599,7 +599,7 @@ impl Kept {
     fn view_with_failure(&self, table: usize, columns: u64, mirror: Option<&Mirror>, order: &mut Vec<(u128, u32)>, made: &mut Made) -> (SharedView, Option<view::HeadFailure>) {
         let Some(at) = self.set(columns) else { return (not_declared(TableId::ALL[table]), None) };
         let set = &self.views[at];
-        let Some(mirror) = mirror.filter(|mirror| self.exact.is_some() || holds_every(mirror, set.columns, self.kinds.len())) else {
+        let Some(mirror) = mirror.filter(|mirror| mirror.keyed() && (self.exact.is_some() || holds_every(mirror, set.columns, self.kinds.len()))) else {
             viewer_runtime::view_record::add("map views", "sets_withheld", 1);
             return (not_declared(TableId::ALL[table]), None);
         };
@@ -844,6 +844,13 @@ impl Shared {
             wake();
         }
     }
+
+    fn notify_progress(&self) {
+        let wake = lock(&self.on_publish).clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
 }
 
 enum Asked {
@@ -970,13 +977,7 @@ impl Store {
         Noting { kept: writing(&self.shared), layers }
     }
 
-    pub fn post(&mut self, mirrors: &Arc<Mirrors>, hour: Hour, branch: BranchId, epoch: u64, whole: bool) {
-        self.settled();
-        {
-            let mut jobs = lock(&self.shared.jobs);
-            jobs.from = Some(Posted { mirrors: Arc::clone(mirrors), hour, branch, epoch, deferred: Some(BTreeSet::new()) });
-            jobs.running += 1;
-        }
+    pub(super) fn accept_asks(&self) {
         let asked = std::mem::take(&mut *lock(&self.shared.asked));
         for asked in asked {
             match asked {
@@ -988,6 +989,16 @@ impl Store {
                 Asked::Close { id } => close(&self.shared, id),
             }
         }
+    }
+
+    pub fn post(&mut self, mirrors: &Arc<Mirrors>, hour: Hour, branch: BranchId, epoch: u64, whole: bool) {
+        self.settled();
+        {
+            let mut jobs = lock(&self.shared.jobs);
+            jobs.from = Some(Posted { mirrors: Arc::clone(mirrors), hour, branch, epoch, deferred: Some(BTreeSet::new()) });
+            jobs.running += 1;
+        }
+        self.accept_asks();
         let kept = reading(&self.shared);
         let mut readers = lock(&self.shared.readers);
         self.shared.epoch.store(epoch, Ordering::Release);
@@ -1228,6 +1239,10 @@ impl Views {
 
     pub fn set_on_publish(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.shared.on_publish) = Some(wake);
+    }
+
+    pub fn notify_progress(&self) {
+        self.shared.notify_progress();
     }
 
     pub fn demand(&self) -> u64 {
@@ -1838,6 +1853,15 @@ pub struct Reader {
 }
 
 impl Reader {
+    pub fn notify_progress(&self) {
+        self.shared.notify_progress();
+    }
+
+    pub fn has_rows_at(&self, hour: Hour) -> bool {
+        let readers = lock(&self.shared.readers);
+        Self::place(&readers, self.id).and_then(|at| readers[at].stands()) == Some((hour, self.seek()))
+    }
+
     fn place(readers: &[Reading], id: u64) -> Option<usize> {
         readers.iter().position(|held| held.id == id)
     }

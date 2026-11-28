@@ -819,6 +819,16 @@ impl Mirror {
         self.column(column).is_some()
     }
 
+    pub(super) fn keyed(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    pub(super) fn covers(&self, read: &crate::layers::Read) -> bool {
+        (!read.keyed || self.keyed()) && read.columns.iter().all(|&column| {
+            column >= self.width() || self.holds(column) || 1_u64.checked_shl(column as u32).is_some_and(|bit| self.omitted & bit != 0)
+        })
+    }
+
     pub fn width(&self) -> usize {
         self.position.len()
     }
