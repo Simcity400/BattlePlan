@@ -424,7 +424,6 @@ impl Orders {
                 return Ok(());
             }
             if !rows.has_rows_at(hour) {
-                self.made = None;
                 return Ok(());
             }
             if Instant::now() >= until {

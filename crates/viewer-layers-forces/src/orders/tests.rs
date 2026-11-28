@@ -482,8 +482,10 @@ fn a_plan_of_rows_behind_the_hour_applied_says_their_hour_and_never_current() {
     let (_entry, mut fed, mut layer, _plans) = gated("orders cadence", campaign);
     stands_at(&mut fed, &mut layer, 0);
     layer.head = Some(3);
-    layer.take();
+    layer.settle_at(3, viewer_layer_core::layers::Settling::step()).unwrap();
     assert_eq!(layer.published(), Published::Cadence(0), "the map applied hour 3, the plan's rows stand at 0");
+    assert!(layer.plan().is_some());
+    assert!(!layer.made_at(3));
     stands_at(&mut fed, &mut layer, 3);
     assert_eq!(layer.published(), Published::Current, "its rows stand at the hour applied");
 }

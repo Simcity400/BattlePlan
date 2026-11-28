@@ -194,9 +194,11 @@ fn a_view_change_keeps_independent_products_in_the_window() {
     side.ask(View::default(), Head::Paced(3), None, None);
     side.wait_window(|side| side.applied() == Some(3) && !side.composing() && side.draws("sum")).unwrap();
     side.ask(View { camera_height: 4.0, ..View::default() }, Head::Paced(3), None, None);
-    side.wait_window(|side| side.view().camera_height == 4.0).unwrap();
-    assert!(!side.composing(), "the changed declaration left the other layer's product in this window");
-    assert!(side.with_side(|side| side.draws("sum") && side.parts().is_some()));
+    side.wait_window(|side| {
+        assert!(side.draws("sum") && !side.composing(), "every window keeps the independent product during the view change");
+        side.view().camera_height == 4.0
+    }).unwrap();
+    assert!(side.with_side(|side| side.parts().is_some()));
 }
 
 struct StubOverlay {

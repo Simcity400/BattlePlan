@@ -190,10 +190,13 @@ impl Layer for Sum {
             gate.lock().unwrap().recv().unwrap();
         }
         *self.composes.lock().unwrap() += 1;
-        let column = self.column.unwrap();
+        self.dirty.clear();
+        let Some(column) = self.column else {
+            self.values.clear();
+            return Ok(());
+        };
         let mirror = mirrors.get(column.table).unwrap();
         self.values = (0..mirror.slots() as u32).map(|slot| if mirror.live(slot) { mirror.number(column, slot).value().map(i64::from) } else { None }).collect();
-        self.dirty.clear();
         Ok(())
     }
 
