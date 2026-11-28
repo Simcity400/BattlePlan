@@ -48,7 +48,7 @@ function factionReply(value: number, options: FactionTotalsRaceOptions) {
   };
 }
 
-function check<O>(projection: BarsProjection<O>, options: O, expected: boolean, panel: (value: number) => unknown, source = 'main') {
+function check<O>(projection: BarsProjection<O>, options: O, expected: boolean | 'target-markers', panel: (value: number) => unknown, source = 'main') {
   const context = `${projection.kind} ${JSON.stringify(options)}`;
   assert.equal(projection.singleValueBars?.(options), expected, context);
   if (!expected) return;
@@ -56,15 +56,34 @@ function check<O>(projection: BarsProjection<O>, options: O, expected: boolean, 
     const view = createBoundedReadView({ hour, panels: new Map([[source, panel(amount)]]) });
     const model = projection.project(view, options);
     assert.ok(model.rows.some(row => row.kind === 'data'), context);
-    assert.ok(isSingleValueOrdered(model), context);
+    assert.ok(isSingleValueOrdered(model, expected), context);
   }
   for (const view of [
     createBoundedReadView({ hour }),
     createBoundedReadView({ hour, refused: new Map([[source, 'Unavailable']]) }),
-  ]) assert.ok(isSingleValueOrdered(projection.project(view, options)), context);
+  ]) assert.ok(isSingleValueOrdered(projection.project(view, options), expected), context);
 }
 
 const cases: Record<string, (projection: BarsProjection<unknown>) => void> = {
+  'fuel-branches/bars': projection => {
+    for (const digits of [0, 1, 2, 3, 4, 5]) {
+      const options = { ...settings, digits };
+      const reply = {
+        tag: 'GER', scale: 100000, consumerNames: ['Army', 'Air'], consumerIcons: [null, null], consumerIconReasons: [null, null],
+        fuelIcon: null, fuelIconReason: null, readHour: hour, consumers: [], missing: null, warnings: [],
+      };
+      check(projection, options, 'target-markers', amount => ({
+        ...reply, consumers: [
+          { index: 0, requested: String(amount * 100000), received: String(amount * 50000), priority: 1 },
+          { index: 1, requested: '0', received: '0', priority: 2 },
+        ],
+      }));
+      for (const panel of [reply, { ...reply, missing: 'Fuel not recorded' }]) {
+        const view = createBoundedReadView({ hour, panels: new Map([['main', panel]]) });
+        assert.ok(isSingleValueOrdered(projection.project(view, options), 'target-markers'));
+      }
+    }
+  },
   'factories/race': projection => {
     for (const split of booleans) for (const { value: mode } of COUNT_MODES) check(projection, {
       ...settings, mode, split, modeLabel: 'Factories', damagedSource: 'damaged7',

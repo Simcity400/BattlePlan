@@ -203,8 +203,9 @@ function makeRecordingCanvas(width = 960, height = 300) {
 
 
 const KIND = 'worker-motion-test';
+const TARGET_KIND = `${KIND}-target`;
 const BLUE = '#4f86f7';
-type Sample = { value: number | null; key?: string; form?: BarsModel['form']; target?: boolean; segments?: boolean; scale?: number; whole?: boolean; art?: boolean; renames?: readonly number[]; france?: number; sectionAt?: number };
+type Sample = { value: number | null; key?: string; form?: BarsModel['form']; target?: number | true; zeroTarget?: boolean; segments?: boolean; scale?: number; whole?: boolean; art?: boolean; renames?: readonly number[]; france?: number; sectionAt?: number; showSectionCount?: boolean };
 
 const testProjection = registerFamilyProjection({
   family: 'bars',
@@ -219,6 +220,8 @@ const testProjection = registerFamilyProjection({
     const name = sample?.renames?.filter(at => view.hour >= at).length;
     const numeric = sample?.value == null ? null : sample.value * Number(options ?? 1);
     const value = numeric === null ? notRecorded('Missing') : knownValue(sample?.whole && numeric !== 0 ? BigInt(numeric) : numeric);
+    const target = sample?.target === true ? 400 : sample?.target;
+    const shortfall = target !== undefined && numeric !== null && target > numeric ? target - numeric : null;
     const rows: BarsModel['rows'][number][] = [{
       kind: 'data',
       key: sample?.key ?? 'GER',
@@ -228,7 +231,12 @@ const testProjection = registerFamilyProjection({
       color: BLUE,
       ...(sample?.art ? { media: { kind: 'flag', tag: 'GER',
         art: readyArt('art://motion-fixture', { frame: defaultArtFrame(20, 13) }) } } : {}),
-      ...(sample?.target ? { target: { numeric: 400, value: knownValue(400) } } : {}),
+      ...(target === undefined ? {} : {
+        target: { numeric: target, value: knownValue(target), ...(shortfall === null ? {} : { shortfall: knownValue(shortfall) }) },
+      }),
+      ...(target !== undefined || sample?.zeroTarget ? {
+        readout: { primary: String(numeric), secondary: `/ ${target ?? 0} a day`, ...(shortfall === null ? {} : { shortfall: `\u2212${shortfall}` }) },
+      } : {}),
       ...(sample?.segments ? { segments: [{ key: 'part', label: 'Part', share: 1, color: BLUE, value }] } : {}),
     }];
     if (sample?.france !== undefined) {
@@ -237,7 +245,9 @@ const testProjection = registerFamilyProjection({
       if (numeric !== null && france > numeric) rows.reverse();
     }
     if (sample?.sectionAt !== undefined) {
-      rows.splice(sample.sectionAt, 0, { kind: 'section', key: 'section', label: 'Countries', count: rows.length - sample.sectionAt });
+      rows.splice(sample.sectionAt, 0, { kind: 'section', key: 'section', label: 'Countries',
+        ...(sample.showSectionCount === false ? {} : { count: rows.length - sample.sectionAt }),
+      });
     }
     return {
       form: sample?.form ?? 'ordered',
@@ -250,6 +260,7 @@ const testProjection = registerFamilyProjection({
   },
 }, 'main');
 registerFamilyProjection({ ...testProjection, kind: `${KIND}-mixed`, singleValueBars: () => false }, 'main');
+registerFamilyProjection({ ...testProjection, kind: TARGET_KIND, singleValueBars: () => 'target-markers' }, 'main');
 
 type TestBitmap = Bitmapped & { close(): void };
 
@@ -339,12 +350,12 @@ function fixture(budget: number) {
   lane.setLaneSurface(canvas.canvas, true);
   lane.follow(1, 'panel', 'p');
   lane.bindRoute(1, 1, 9, 1, 0);
-  const bind = (measure = 1, id = 1, reducedMotion = false, mixed = false, pin: number | null = null) => {
+  const bind = (measure = 1, id = 1, reducedMotion = false, mixed: boolean | 'target' = false, pin: number | null = null) => {
     lane.payloads({ type: 'payloads', put: [[1, { s: 1 }], [10 + measure, measure]] });
     lane.bind(id, {
       generation: measure, owner: 'track', surfaces: [{ width: 480, height: 240, dpr: 1 }], offset: 0, pin,
     }, {
-      family: 'bars', kind: mixed ? `${KIND}-mixed` : KIND, view: 'main', options: measure, sources: { s: 1 }, scrollTop: 0,
+      family: 'bars', kind: mixed === 'target' ? TARGET_KIND : mixed ? `${KIND}-mixed` : KIND, view: 'main', options: measure, sources: { s: 1 }, scrollTop: 0,
       width: 480, height: 240, theme: TEST_THEME, audit: true, reducedMotion,
       revisions: { options: 10 + measure, sources: 1 },
     } satisfies FamilyBarsBinding);
@@ -874,6 +885,7 @@ describe('Ordered bar playback', () => {
       [{ value: 100, france: 50, sectionAt: 1 }, { value: 80, france: 120, sectionAt: 1 }, undefined],
       [{ value: 100, france: 50, sectionAt: 0 }, { value: 80, france: 120, sectionAt: 1 }, undefined],
       [{ value: 100, france: 50 }, { value: 80, france: 120, key: 'FRA' }, { membership: 1 }],
+      [{ value: 50, france: 100, sectionAt: 1 }, { value: 80, france: 120, sectionAt: 1, key: 'FRA' }, { membership: 1 }],
     ] as const) await withLane(async f => {
       f.record(100, first);
       f.record(101, second);
@@ -882,6 +894,19 @@ describe('Ordered bar playback', () => {
       f.tick(0);
       assert.equal(f.served.at(-1)?.changed, 0);
       assert.deepEqual(f.served.at(-1)?.motionDiagnostics?.rowChanges, rowChanges);
+    });
+  });
+
+  it('allows a section to gain a count during same-order motion', async () => {
+    for (const [france, painted] of [[60, 55], [120, 50]] as const) await withLane(async f => {
+      f.record(100, { value: 100, france: 50, sectionAt: 0, showSectionCount: false });
+      f.record(101, { value: 80, france, sectionAt: 0 });
+      f.clock(100, 1);
+      await f.request(100, 1);
+      const unit = f.barWidth() / 50;
+      f.clock(100.5, 1);
+      f.tick(0);
+      assert.ok(Math.abs(f.barWidth() / unit - painted) < .01);
     });
   });
 
@@ -1060,6 +1085,24 @@ describe('Ordered bar playback', () => {
     assert.equal(errors.mock.callCount(), 1);
   }));
 
+  it('releases target-marker playback when a projected endpoint has segments', async t => withLane(async f => {
+    const errors = t.mock.method(console, 'error', () => {});
+    f.bind(1, 1, false, 'target');
+    f.record(100, { value: 40, target: 100 });
+    f.record(101, { value: 60, target: 120, segments: true });
+    f.record(102, { value: 80, target: 140 });
+    f.clock(100.5, 1);
+    await f.request(100, 1);
+    f.tick(0);
+    assert.equal(errors.mock.callCount(), 1);
+    assert.match(String(errors.mock.calls[0]?.arguments[0]), /target-marker guarantee/);
+    f.clock(102, 1);
+    await f.request(102, 1);
+    assert.ok(f.presented.at(-1)?.entries[0]?.repainted);
+    f.tick(0);
+    assert.deepEqual(f.sampled, [1]);
+  }));
+
   it('retains ordinary pause priority for a target-marked bar', async () => withLane(async f => {
     f.mount(2, true);
     f.bind(1, 1, false, true);
@@ -1135,7 +1178,7 @@ describe('Ordered bar playback', () => {
     assert.ok(f.operations().some(op => op.op === 'fillText' && op.args[0] === '100'));
   }));
 
-  it('leaves target bars and the exact page path alone', async () => withLane(async f => {
+  it('leaves target bars without a playback guarantee on the exact page path', async () => withLane(async f => {
     f.bind(1, 1, false, true);
     f.record(100, { value: 100, target: true });
     f.record(101, { value: 200, target: true });
@@ -1146,6 +1189,120 @@ describe('Ordered bar playback', () => {
     f.tick(0);
     assert.equal(f.barWidth(), width);
   }));
+
+  it('moves delivered and target positions while keeping the recorded fuel readout', async () => {
+    for (const nextValue of [40, 60]) await withLane(async f => {
+      f.bind(1, 1, false, 'target');
+      f.record(100, { value: 40, target: 100 });
+      f.record(101, { value: nextValue, target: 180 });
+      await f.request(100);
+      const targetWidth = () => {
+        const gap = f.operations().find(op => op.op === 'roundRect' && op.globalAlpha === 0.16);
+        assert.ok(gap, 'expected a painted target gap');
+        return Number(gap.args[0]) + Number(gap.args[2]) - Number(f.bar().args[0]);
+      };
+      const check = (width: number, target: number, value: number, readout: number) => {
+        const tick = f.operations().find(op => op.op === 'fillText' && (op.args[0] === '100' || op.args[0] === '200'));
+        assert.ok(tick);
+        const axisWidth = Number(tick.args[1]) - Number(f.bar().args[0]);
+        const axisValue = Number(tick.args[0]);
+        assert.ok(Math.abs(f.barWidth() / axisWidth - width / axisValue) < .02);
+        assert.ok(Math.abs(targetWidth() / axisWidth - target / axisValue) < .02);
+        const text = f.operations().filter(op => op.op === 'fillText').map(op => op.args[0]);
+        assert.ok(text.includes(String(value)));
+        assert.ok(text.includes(`/ ${readout} a day`));
+        assert.ok(text.includes(`\u2212${readout - value}`));
+      };
+      const first = f.presented.at(-1)?.entries[0];
+      assert.match(JSON.stringify(first?.fields.audit), /target.*100/);
+      f.canvas.clearOps();
+      f.clock(100.5, 1, 1, true);
+      f.tick(0);
+      check((40 + nextValue) / 2, 140, 40, 100);
+      assert.equal(f.served.at(-1)?.changed, 1);
+      assert.equal(f.presented.at(-1)?.entries[0], first);
+
+      f.canvas.clearOps();
+      f.clock(101, 1);
+      f.tick(0);
+      check(nextValue, 180, nextValue, 180);
+      f.canvas.clearOps();
+      f.clock(100.5, 0);
+      await f.request(100);
+      check(40, 100, 40, 100);
+    });
+  });
+
+  it('tweens target and delivered edges to the cold endpoint through plot changes and subpixel fills', async () => {
+    const small = { value: 50, target: 100, scale: 100 };
+    const large = { value: 505, target: 1000, scale: 1000 };
+    const tiny = { value: .1, target: 100, scale: 100 };
+    const zero = { value: 0, target: 100, scale: 100 };
+    const fulfilled = { ...tiny, target: .1 };
+    const unmet = { ...zero, target: .1 };
+    for (const [first, next] of [[small, large], [large, small], [tiny, zero], [zero, tiny], [fulfilled, unmet], [unmet, fulfilled]] as const) await withLane(async f => {
+      f.bind(1, 1, false, 'target');
+      f.record(100, first);
+      f.record(101, next);
+      await f.request(100);
+      const edges = () => {
+        const gap = f.operations().find(op => op.op === 'roundRect' && op.globalAlpha === 0.16);
+        const fill = f.operations().find(op => (op.op === 'fillRect' || op.op === 'roundRect') && op.fillStyle === BLUE);
+        assert.ok(fill || gap);
+        const delivered = fill ? Number(fill.args[0]) + Number(fill.args[2]) : Number(gap!.args[0]);
+        const requested = gap ? Number(gap.args[0]) + Number(gap.args[2]) : delivered;
+        return [delivered, requested];
+      };
+      const start = edges();
+      f.canvas.clearOps();
+      await f.request(101);
+      const cold = edges();
+      if (first.target !== next.target) assert.ok(Math.abs(start[1]! - cold[1]!) > 4, 'the readout shifts the plot edge');
+      for (const fraction of [.5, .75, .99]) {
+        f.canvas.clearOps();
+        f.clock(100 + fraction, 1);
+        f.tick(0);
+        for (const [i, edge] of edges().entries()) {
+          const expected = start[i]! + (cold[i]! - start[i]!) * fraction;
+          assert.ok(Math.abs(edge - expected) < .02, `edge ${i} at ${fraction}, got ${edge}, expected ${expected}`);
+        }
+        const labels = f.operations().filter(op => op.op === 'fillText').map(op => op.args[0]);
+        assert.ok(labels.includes(String(first.value)));
+        assert.ok(labels.includes(`/ ${first.target} a day`));
+      }
+    });
+  });
+
+  it('tweens an unmarked ordered fill from its cold minimum width to zero', async () => withLane(async f => {
+    f.record(100, { value: .1, scale: 100 });
+    f.record(101, { value: 0, scale: 100 });
+    await f.request(100);
+    assert.equal(f.barWidth(), 2);
+    f.canvas.clearOps();
+    f.clock(100.5, 1);
+    f.tick(0);
+    assert.equal(f.barWidth(), 1);
+  }));
+
+  it('cuts target motion when a marker disappears or proof has a gap', async () => {
+    for (const [hour, target] of [[101, undefined], [102, 180]] as const) await withLane(async f => {
+      f.bind(1, 1, false, 'target');
+      f.record(100, { value: 40, target: 100 });
+      f.record(hour, target === undefined ? { value: 0, zeroTarget: true } : { value: 80, target });
+      await f.request(100);
+      const width = f.barWidth();
+      f.clock(100.5, 1, 1, true);
+      f.tick(0);
+      assert.equal(f.served.at(-1)?.changed, 0);
+      assert.equal(f.barWidth(), width);
+      f.clock(hour, 1);
+      f.canvas.clearOps();
+      f.tick(0);
+      const recorded = target === undefined ? '/ 0 a day' : '80';
+      assert.ok(f.operations().some(op => op.op === 'fillText' && op.args[0] === recorded));
+      assert.equal(f.operations().some(op => op.op === 'roundRect' && op.globalAlpha === 0.16), target !== undefined);
+    });
+  });
 
   it('draws exact transport and rank refusals within their proof and cuts across adjacent gaps', async () => {
     for (const origin of ['transport', 'rank']) await withLane(async f => {
@@ -1639,13 +1796,21 @@ describe('Ordered bar playback', () => {
   it('uses the same interpolated scale for the width and the axis', async () => withLane(async f => {
     f.record(100, { value: 60, scale: 200 });
     f.record(101, { value: 100, scale: 400 });
+    const sample = () => {
+      const tick = f.operations().find(op => op.op === 'fillText' && op.args[0] === '100');
+      assert.ok(tick);
+      return { width: f.barWidth(), oneHundred: Number(tick.args[1]) - Number(f.bar().args[0]) };
+    };
     await f.request(100);
+    const first = sample();
+    f.canvas.clearOps();
+    await f.request(101);
+    const last = sample();
     f.canvas.clearOps();
     f.clock(100.5, 1);
     f.tick(0);
-    const tick = f.operations().find(op => op.op === 'fillText' && op.args[0] === '100');
-    assert.ok(tick);
-    const oneHundred = Number(tick.args[1]) - Number(f.bar().args[0]);
-    assert.ok(Math.abs(f.barWidth() / oneHundred - .8) < .02);
+    const middle = sample();
+    assert.ok(Math.abs(middle.width - (first.width + last.width) / 2) < .02);
+    assert.ok(Math.abs(middle.oneHundred - (first.oneHundred + last.oneHundred) / 2) < 1);
   }));
 });

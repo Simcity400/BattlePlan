@@ -10,4 +10,6 @@ Chart row motion derives each render from the last committed state. A layout eff
 
 During playback, bars interpolate their widths between successive proven readings for the same rows when the view and its options guarantee one ordered value per row for every reading. When only the order of the data rows changes, the widths interpolate by row key in the current order, and the rows swap at the next recorded hour. Numbers keep their recorded values at the clock hour. Gaps, missing readings, refusals, changes to row membership or labels, and other changes to chart structure cut to the recorded picture. Pausing shows the recorded value at the paused hour.
 
+Ordered bars interpolate the painted geometry of each endpoint, including fills that shrink below their normal minimum width on the way to zero. The Fuel by branch bars also interpolate requested targets and the dashed shortfall between compatible readings. Readouts and shortfalls keep their recorded amounts, and a target appearing or disappearing cuts to the recorded picture at its hour.
+
 [Axis values](../../ui/src/charts/valueAxis.ts)

@@ -63,7 +63,26 @@ export interface BarsEasedRow {
   readonly rightFrac?: number;
   readonly rightSideFrac?: number;
   readonly targetFrac?: number;
+  readonly orderedGeometry?: OrderedBarGeometry;
   readonly segmentShares?: Readonly<Record<string, number>>;
+}
+
+interface OrderedBarGeometry {
+  readonly fill: number;
+  readonly gapStart: number;
+  readonly gapEnd: number;
+  readonly gapStroke: number;
+  readonly labelEnd: number;
+}
+
+export function orderedBarGeometry(plotWidth: number, fillFraction: number, targetFraction?: number): OrderedBarGeometry {
+  const target = targetFraction === undefined ? plotWidth : Math.min(plotWidth, Math.max(2, targetFraction * plotWidth));
+  const fill = fillFraction > 0 ? Math.min(target, Math.max(2, fillFraction * plotWidth)) : 0;
+  const labelEnd = targetFraction === undefined ? fill : target;
+  if (labelEnd <= fill + 1) return { fill, gapStart: fill, gapEnd: fill, gapStroke: 0, labelEnd };
+  const gapStart = fill > 0 ? fill + 1 : 0;
+  const gapEnd = gapStart + Math.max(2, target - gapStart);
+  return { fill, gapStart, gapEnd, gapStroke: 1, labelEnd };
 }
 
 export interface DrawFamilyBarsInput {
@@ -725,39 +744,9 @@ export function drawFamilyBars(ctx: Canvas2D, input: DrawFamilyBarsInput): BarsP
       continue;
     }
 
-    let drawnEndX = layout.plotLeft;
-    if (row.target && row.target.numeric > 0) {
-      const targetFrac = eased?.targetFrac !== undefined ? eased.targetFrac : row.target.numeric / layout.scaleMax;
-      const targetW = Math.min(layout.plotWidth, Math.max(2, targetFrac * layout.plotWidth));
-      const deliveredFrac = eased?.numericFrac !== undefined ? eased.numericFrac : Math.max(0, row.numeric ?? 0) / layout.scaleMax;
-      const deliveredW = deliveredFrac > 0
-        ? Math.min(targetW, Math.max(2, deliveredFrac * layout.plotWidth))
-        : 0;
-      if (deliveredW > 0) {
-        drawBar(ctx, layout.plotLeft, barY, deliveredW, layout.barHeight, barColor, 'right');
-      }
-      if (targetW > deliveredW + 1) {
-        const gapX = layout.plotLeft + deliveredW + (deliveredW > 0 ? 1 : 0);
-        const gapW = Math.max(2, targetW - deliveredW - (deliveredW > 0 ? 1 : 0));
-        const r = barCornerRadius(layout.barHeight);
-        ctx.save();
-        ctx.fillStyle = tokens.shortFill;
-        ctx.globalAlpha = 0.16;
-        ctx.beginPath();
-        ctx.roundRect(gapX, barY, gapW, layout.barHeight, [0, r, r, 0]);
-        ctx.fill();
-        ctx.globalAlpha = 0.9;
-        ctx.strokeStyle = tokens.shortage;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2.5, 2]);
-        ctx.beginPath();
-        ctx.roundRect(gapX + 0.5, barY + 0.5, Math.max(0, gapW - 1), Math.max(0, layout.barHeight - 1), [0, r, r, 0]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-      }
-      drawnEndX = layout.plotLeft + targetW;
-    } else if (row.segments?.length) {
+    let drawnEndX: number;
+    const targetFrac = row.target && row.target.numeric > 0 ? eased?.targetFrac ?? row.target.numeric / layout.scaleMax : undefined;
+    if (targetFrac === undefined && row.segments?.length) {
       const totalFrac = eased?.numericFrac !== undefined ? eased.numericFrac : Math.max(0, row.numeric ?? 0) / layout.scaleMax;
       const totalBarW = totalFrac > 0 ? Math.min(layout.plotWidth, Math.max(2, totalFrac * layout.plotWidth)) : 0;
       if (totalBarW > 0) {
@@ -772,13 +761,32 @@ export function drawFamilyBars(ctx: Canvas2D, input: DrawFamilyBarsInput): BarsP
         );
       }
       drawnEndX = layout.plotLeft + totalBarW;
-    } else if ((row.numeric !== undefined && row.numeric !== null && row.numeric > 0) || (eased?.numericFrac !== undefined && eased.numericFrac > 0)) {
-      const frac = eased?.numericFrac !== undefined ? eased.numericFrac : (row.numeric ?? 0) / layout.scaleMax;
-      if (frac > 0) {
-        const barW = Math.min(layout.plotWidth, Math.max(2, frac * layout.plotWidth));
-        drawBar(ctx, layout.plotLeft, barY, barW, layout.barHeight, barColor, 'right');
-        drawnEndX = layout.plotLeft + barW;
+    } else {
+      const { fill, gapStart, gapEnd, gapStroke, labelEnd } = eased?.orderedGeometry ?? orderedBarGeometry(
+        layout.plotWidth, eased?.numericFrac ?? (row.numeric ?? 0) / layout.scaleMax, targetFrac,
+      );
+      drawBar(ctx, layout.plotLeft, barY, fill, layout.barHeight, barColor, 'right');
+      if (gapEnd > gapStart) {
+        const gapX = layout.plotLeft + gapStart;
+        const gapW = gapEnd - gapStart;
+        const r = barCornerRadius(layout.barHeight);
+        ctx.save();
+        ctx.fillStyle = tokens.shortFill;
+        ctx.globalAlpha = 0.16;
+        ctx.beginPath();
+        ctx.roundRect(gapX, barY, gapW, layout.barHeight, [0, r, r, 0]);
+        ctx.fill();
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = tokens.shortage;
+        ctx.lineWidth = gapStroke;
+        ctx.setLineDash([2.5, 2]);
+        ctx.beginPath();
+        ctx.roundRect(gapX + gapStroke / 2, barY + gapStroke / 2, gapW - gapStroke, Math.max(0, layout.barHeight - gapStroke), [0, r, r, 0]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
       }
+      drawnEndX = layout.plotLeft + labelEnd;
     }
 
     if (layout.showReadout && row.readout) {

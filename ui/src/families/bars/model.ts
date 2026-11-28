@@ -4,7 +4,7 @@ import { auditCell, auditRow, type FamilyAuditRow } from '../auditRow.ts';
 import { flagArtHandle, flagChoiceArt } from '../art/provider.ts';
 import { artHandleKey, type ArtResult } from '../art/types.ts';
 import { canonicalAuditValue } from '../audit.ts';
-import type { BoundedReadView, FamilyProjection, MirrorModel, MirrorRow } from '../contract.ts';
+import type { BarsPlaybackForm, BoundedReadView, FamilyProjection, MirrorModel, MirrorRow } from '../contract.ts';
 import type { FamilyActionPayload, FamilyTooltipPayload, TooltipListItem } from '../host/tooltips.ts';
 import { resolveName } from '../table/identityCell.ts';
 import { assertValue, hasMeasuredValue, type Value } from '../value.ts';
@@ -251,10 +251,12 @@ export interface BarsProjection<TOptions = unknown> extends FamilyProjection<Bar
   nextChange?(readView: BoundedReadView, options: TOptions): number;
 }
 
-export function isSingleValueOrdered(model: BarsModel): boolean {
+export function isSingleValueOrdered(model: BarsModel, form: BarsPlaybackForm = true): boolean {
   return model.form === 'ordered' && !model.pickList && !model.twoSidedLayout
     && model.rows.every(row => row.kind === 'section' || (row.kind === 'data' && row.value !== undefined
-      && row.segments === undefined && !row.target && !row.left && !row.right && !row.rightSide && !row.pair && !row.readout));
+      && row.segments === undefined && !row.left && !row.right && !row.rightSide && !row.pair
+      && (form === true ? !row.target && !row.readout
+        : !!row.target || (row.value.value.kind === 'zero' && row.numeric === 0))));
 }
 
 export class FutureBarsDataError extends Error {

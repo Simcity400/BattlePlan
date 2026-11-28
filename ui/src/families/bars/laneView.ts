@@ -3,9 +3,9 @@ import { textWidth } from '../../charts/textWidth.ts';
 import type { LaneBinding, LaneFamily, LaneFrame } from '../laneRuntime.ts';
 import type { MotionSampleDiagnostic } from '../motion.ts';
 import { glideDurationForSpeed } from '../table/painter.ts';
-import { barsAuditWindow, barsRangeForBand, barsScrollHeight, layoutFamilyBars, visibleBarsRange, barsScales, type BarsLayout } from './layout.ts';
+import { barsAuditWindow, barsRangeForBand, barsScrollHeight, layoutFamilyBars, visibleBarsRange, type BarsLayout } from './layout.ts';
 import { assertBarsModelValid, barsLabelText, deriveBarsAudit, deriveBarsMirror, deriveBarsTooltip, formatBarsValueField, isSingleValueOrdered, type BarsDataRow, type BarsModel, type BarsRow, type BarsValueField } from './model.ts';
-import { collectVisibleBarsIcons, drawFamilyBars, easeBarFraction, hitFamilyBars, type BarsEasedRow, type BarsGlideOffset } from './painter.ts';
+import { collectVisibleBarsIcons, drawFamilyBars, easeBarFraction, hitFamilyBars, orderedBarGeometry, type BarsEasedRow, type BarsGlideOffset } from './painter.ts';
 import { hitPickList, pickAudit, pickedKey, pickNav, pickTooltip } from './pickList.ts';
 import { barsRegionRows } from './shareRows.ts';
 import { regionHitKey } from '../regions/regionRows.ts';
@@ -19,7 +19,9 @@ export interface FamilyBarsBinding<TOptions = unknown> extends LaneBinding<TOpti
   readonly pauseFlush?: number;
 }
 
-type BarsFrame = LaneFrame<FamilyBarsBinding, BarsModel, BarsLayout>;
+type BarsFrame = LaneFrame<FamilyBarsBinding, BarsModel, BarsLayout> & {
+  readonly playbackValues?: ReadonlyMap<string, BarsEasedRow>;
+};
 
 interface Glide {
   readonly duration: number;
@@ -192,11 +194,16 @@ function sameFormat(first: ValueFormat | undefined, second: ValueFormat | undefi
     && first.percent === second.percent && first.unit === second.unit);
 }
 
+function measuredTarget(target: NonNullable<BarsDataRow['target']>): boolean {
+  return Number.isFinite(target.numeric) && target.numeric > 0
+    && (target.value.kind === 'known' || target.value.kind === 'zero') && typeof target.value.value !== 'string';
+}
+
 function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSampleDiagnostic): readonly BarsRow[] | null {
   if (first === second) return second.rows;
   if (first.showAxis !== second.showAxis || first.rowHeight !== second.rowHeight || first.barHeight !== second.barHeight
     || first.caption !== second.caption || first.scaleUnit !== second.scaleUnit || !sameFormat(first.scaleFormat, second.scaleFormat)
-    || first.leftHeader !== second.leftHeader || first.rightHeader !== second.rightHeader) return null;
+    || first.leftHeader !== second.leftHeader || first.rightHeader !== second.rightHeader || first.readoutHeader !== second.readoutHeader) return null;
   if (first.rows.length !== second.rows.length) {
     if (diagnostic) diagnostic.rowChange = 'membership';
     return null;
@@ -211,6 +218,7 @@ function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSa
       byKey.set(row.key, { row, section });
     }
     const matched: BarsRow[] = [];
+    let sectionMismatch = false;
     section = -1;
     for (const [i, row] of first.rows.entries()) {
       if (row.kind === 'section') section = i;
@@ -219,10 +227,11 @@ function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSa
         if (diagnostic) diagnostic.rowChange = 'membership';
         return null;
       }
-      if (section !== endpoint.section) return null;
+      sectionMismatch ||= section !== endpoint.section;
       matched.push(endpoint.row);
       byKey.delete(row.key);
     }
+    if (sectionMismatch) return null;
     endpoints = matched;
   }
   for (const [i, row] of first.rows.entries()) {
@@ -233,7 +242,7 @@ function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSa
         if (diagnostic) diagnostic.rowChange = 'label';
         return null;
       }
-      if (row.kind === 'section' && endpoint.kind === 'section' && row.count !== endpoint.count) return null;
+      if (reordered && row.kind === 'section' && endpoint.kind === 'section' && row.count !== endpoint.count) return null;
       continue;
     }
     if (row.label?.kind !== endpoint.label?.kind || barsLabelText(row.label) !== barsLabelText(endpoint.label)) {
@@ -241,38 +250,53 @@ function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSa
       return null;
     }
     if (row.subject !== endpoint.subject || row.group !== endpoint.group || row.region !== endpoint.region
-      || row.media?.kind !== endpoint.media?.kind || !sameFormat(row.value?.format, endpoint.value?.format)) return null;
+      || row.media?.kind !== endpoint.media?.kind || !sameFormat(row.value?.format, endpoint.value?.format)
+      || Boolean(row.target) !== Boolean(endpoint.target) || !sameFormat(row.target?.format, endpoint.target?.format)
+      || Boolean(row.readout) !== Boolean(endpoint.readout)) return null;
   }
   if (diagnostic && reordered) diagnostic.rowChange = 'reorder';
   return endpoints;
 }
 
-function orderedMotion(frame: BarsFrame, next: BarsModel, fraction: number, diagnostic?: MotionSampleDiagnostic): BarsFrame | false | null {
+function orderedMotion(frame: BarsFrame, next: BarsModel, fraction: number, nextLayout: () => BarsLayout, diagnostic?: MotionSampleDiagnostic): BarsFrame | false | null {
   const current = frame.model;
-  if (!isSingleValueOrdered(next)) return null;
   const endpoints = matchingRows(current, next, diagnostic);
   if (!endpoints) return null;
-  const rows: BarsModel['rows'][number][] = [];
-  let changed = false;
+  const start = frame.layout;
+  const endLayout = nextLayout();
+  const playbackValues = new Map<string, BarsEasedRow>();
+  const interpolate = (from: number, to: number) => from + (to - from) * fraction;
+  let changed = start.plotLeft !== endLayout.plotLeft
+    || (start.showAxis && (start.plotWidth !== endLayout.plotWidth || start.scaleMax !== endLayout.scaleMax));
   for (let i = 0; i < current.rows.length; i++) {
     const row = current.rows[i]!;
     const end = endpoints[i]!;
-    if (row.kind === 'section') { rows.push(row); continue; }
+    if (row.kind === 'section') continue;
     if (row.kind !== 'data' || end.kind !== 'data' || row.numeric == null || end.numeric == null
       || !row.value || !end.value
       || (row.value.value.kind !== 'zero' && row.value.value.kind !== 'known')
       || (end.value.value.kind !== 'zero' && end.value.value.kind !== 'known')) return null;
-    if (row.numeric === end.numeric) { rows.push(row); continue; }
-    changed = true;
-    rows.push({ ...row, numeric: row.numeric + (end.numeric - row.numeric) * fraction });
+    if ((row.target && !measuredTarget(row.target)) || (end.target && !measuredTarget(end.target))) return null;
+    const from = orderedBarGeometry(start.plotWidth, row.numeric / start.scaleMax, row.target && row.target.numeric / start.scaleMax);
+    const to = orderedBarGeometry(endLayout.plotWidth, end.numeric / endLayout.scaleMax, end.target && end.target.numeric / endLayout.scaleMax);
+    playbackValues.set(row.key, { orderedGeometry: {
+      fill: interpolate(from.fill, to.fill),
+      gapStart: interpolate(from.gapStart, to.gapStart),
+      gapEnd: interpolate(from.gapEnd, to.gapEnd),
+      gapStroke: interpolate(from.gapStroke, to.gapStroke),
+      labelEnd: interpolate(from.labelEnd, to.labelEnd),
+    } });
+    changed ||= from.fill !== to.fill || from.gapStart !== to.gapStart || from.gapEnd !== to.gapEnd
+      || from.gapStroke !== to.gapStroke || from.labelEnd !== to.labelEnd;
   }
   if (!changed) return false;
-  const currentScale = frame.layout.scaleMax;
-  const endScale = barsScales(next, frame.layout.showAxis).scaleMax;
+  const plotWidth = interpolate(start.plotWidth, endLayout.plotWidth);
+  const plotLeft = interpolate(start.plotLeft, endLayout.plotLeft);
+  const pixelsPerUnit = interpolate(start.plotWidth / start.scaleMax, endLayout.plotWidth / endLayout.scaleMax);
   return {
     ...frame,
-    model: { ...current, rows },
-    layout: { ...frame.layout, scaleMax: currentScale + (endScale - currentScale) * fraction },
+    layout: { ...start, plotWidth, plotLeft, plotRight: plotLeft + plotWidth, scaleMax: plotWidth / pixelsPerUnit },
+    playbackValues,
   };
 }
 
@@ -298,9 +322,10 @@ export const barsLane: LaneFamily<FamilyBarsBinding, BarsModel, BarsLayout> = {
       return textWidth(measure, text);
     });
   },
-  paint(ctx, frame) {
+  paint(ctx, frame: BarsFrame) {
     const glide = glideOf(frame);
     const eased = easedBarsOf(frame);
+    const values = frame.playbackValues ?? eased.map;
     drawFamilyBars(ctx, {
       model: frame.model,
       layout: frame.layout,
@@ -309,7 +334,7 @@ export const barsLane: LaneFamily<FamilyBarsBinding, BarsModel, BarsLayout> = {
       now: frame.now,
       glideDuration: glide.duration,
       glide: glide.offsets,
-      ...(eased.map ? { easedValues: eased.map } : {}),
+      ...(values ? { easedValues: values } : {}),
       artCache: frame.art,
       inspectedKey: inspected(frame.inspect)?.key ?? null,
       selectedKey: frame.binding.selectedKey,

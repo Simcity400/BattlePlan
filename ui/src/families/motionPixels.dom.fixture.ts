@@ -18,7 +18,7 @@ const theme: FamilyTheme = {
   hatchEdge: colours.border, font: 'Segoe UI, sans-serif', fontSize: { small: 11, body: 12 }, lineWidth: 1, hatchSpacing: 6,
 };
 
-function rig(kind: string, dpr: number) {
+function rig(kind: string, dpr: number, values = [30, 150]) {
   let now = 1000;
   let serial = 0;
   let presented: Presented<ImageBitmap> | undefined;
@@ -41,8 +41,8 @@ function rig(kind: string, dpr: number) {
     slots: [{ widget: 1, x: slotX, y: 4, w: 481, h: 235, bx: slotX, by: 2, bw: 481, bh: 238, visible: true }],
   });
   layout();
-  lane.receive('panels', datedPanel(1, 100, 30));
-  lane.receive('panels', datedPanel(1, 101, 150));
+  lane.receive('panels', datedPanel(1, 100, values[0]));
+  lane.receive('panels', datedPanel(1, 101, values[1]));
   const request = async (now: number, speed = 0, acknowledge = false, refused: Refusal[] = []) => {
     const installed = acknowledge ? (presented?.entries ?? []).map(({ id, widget, binding }) => ({ id, widget, binding })) : [];
     lane.frame({ type: 'frame', serial: ++serial, now, target: now, exact: true, seek: 1, speed, installed, refused, inspect: [] });
@@ -70,7 +70,7 @@ function changedBytes(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
   return changed;
 }
 
-async function checkSettledPixels() {
+async function checkSettledPixels(withTarget = false) {
   const sprite = new OffscreenCanvas(37, 21);
   const brush = sprite.getContext('2d')!;
   brush.fillStyle = theme.red;
@@ -79,24 +79,30 @@ async function checkSettledPixels() {
   brush.fillRect(9, 0, 23, 11);
   const bitmap = sprite.transferToImageBitmap();
   const flag = { ...readyArt('fixture-flag', { frame: defaultArtFrame(37, 21) }), bitmap };
-  const kind = 'ordered-bars-pixel-settle';
+  const kind = withTarget ? 'target-bars-pixel-settle' : 'ordered-bars-pixel-settle';
   registerFamilyProjection({
     family: 'bars', kind,
-    singleValueBars: () => true,
+    singleValueBars: () => withTarget ? 'target-markers' : true,
     project(view): BarsModel {
       const refused = view.refused('main');
       if (refused) return { form: 'ordered', hour: view.hour, rows: [], empty: refused, emptyKind: 'unavailable' };
       const value = Number(view.panel('main'));
+      const target = value <= 0.1 ? 0.1 : value + 40;
       return {
         form: 'ordered', hour: view.hour, scaleMax: 200, showAxis: true,
         rows: [{
           kind: 'data', key: 'fixture', label: knownValue('Fixture country'), numeric: value, value: { value: knownValue(value) },
           media: { kind: 'flag', art: flag, tag: 'FIX' },
+          ...(withTarget ? {
+            target: { numeric: target, value: knownValue(target) },
+            readout: { primary: String(value), secondary: `/ ${target} a day` },
+          } : {}),
         }],
       };
     },
   }, 'main');
   const results: { dpr: number; moving: number; paused: number }[] = [];
+  const tinyEndpoints: { dpr: number; first: number; last: number }[] = [];
   for (const dpr of [1, 1.25, 1.5, 2]) {
     const played = rig(kind, dpr);
     await played.request(100);
@@ -111,6 +117,20 @@ async function checkSettledPixels() {
     const cold = rig(kind, dpr);
     await cold.request(100);
     results.push({ dpr, moving, paused: changedBytes(cold.pixels(), played.pixels()) });
+    if (withTarget) for (const values of [[0.1, 0], [0, 0.1]]) {
+      const live = rig(kind, dpr, values);
+      const endpoint = rig(kind, dpr, values);
+      live.clock(true);
+      await live.request(100, 1);
+      live.step(0);
+      await endpoint.request(100);
+      const first = changedBytes(endpoint.pixels(), live.pixels());
+      live.step(500);
+      live.step(500);
+      await endpoint.request(101);
+      const last = changedBytes(endpoint.pixels(), live.pixels());
+      tinyEndpoints.push({ dpr, first, last });
+    }
   }
   const histories = [];
   for (const revoked of [false, true]) {
@@ -171,7 +191,7 @@ async function checkSettledPixels() {
   await coldRefusal.request(101);
   const afterRefusal = changedBytes(refused.pixels(), coldRefusal.pixels());
   bitmap.close();
-  return { results, histories, afterScroll, afterResize, afterTick, afterRefusal };
+  return { results, tinyEndpoints, histories, afterScroll, afterResize, afterTick, afterRefusal };
 }
 
 (window as unknown as { checkSettledPixels: typeof checkSettledPixels }).checkSettledPixels = checkSettledPixels;

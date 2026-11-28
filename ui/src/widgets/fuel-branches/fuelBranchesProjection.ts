@@ -136,6 +136,7 @@ function project(readView: BoundedReadView, options: FuelBranchesOptions): BarsM
 export const fuelBranchesProjection: BarsProjection<FuelBranchesOptions> = registerFamilyProjection({
   kind: 'fuel-branches',
   family: 'bars',
+  singleValueBars: () => 'target-markers',
   nextChange: () => Infinity,
   project,
 }, 'bars');
